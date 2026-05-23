@@ -292,11 +292,70 @@ skipped. stages_done += "write".
 
 **Phase 2 (processing) complete via the writer; Phase 3 (delivery) is next.**
 
+### Between step 13 and step 14 · ADR-010 amendment · 2026-05-23
+
+Piper integration path corrected in ADR-010 ahead of step 14. The original spec described
+a standalone Windows binary with subprocess invocation against `rhasspy/piper`, but that
+project is archived and Piper development moved to `OHF-Voice/piper1-gpl` which ships as
+a Python package (`pip install piper-tts`, v1.4.2 as of April 2026) with a `PiperVoice`
+API. License changed from MIT to GPL-3.0 (no practical impact for personal use; would
+impose GPL obligations on any future redistribution). Amendment block at top of
+ADR-010; Installation section now leads with `pip install piper-tts`; Python integration
+block flags "no subprocess, no binary in PATH" explicitly; Open questions adds a guard
+against silently switching back to subprocess invocation. No code change (step 14 not
+yet built); the corrected integration lands cleanly when step 14 starts.
+
+### Step 14 · `musahit/tts/` · 2026-05-23
+
+First Phase 3 (delivery) stage. `Synthesizer.run(run_id)` reads today's briefing
+markdown via `briefings.markdown_path`, extracts the ADR-009 voiced scope via
+`extract_voiced_briefing(md)` (header + DEFCON 1-2 ÖNCELİKLİ + DEFCON 3 MATERYAL
+sans Kaynaklar + AÇIK GELİŞMELER + literal closing line), preprocesses each chunk
+via `preprocess_for_tts` (TCMB→"Te Ce Me Be", DEFCON N→Turkish numeral, markdown
+strip, Kaynaklar line drop, blank-line collapse), synthesises each chunk via
+`PiperClient.synthesize`, interleaves a 200ms 80Hz tick between chunks, concatenates
+the WAVs via pure-stdlib `concatenate_wavs`, encodes to 128kbps mono MP3 via
+`wav_to_mp3` (pydub→ffmpeg), writes `briefings/YYYY/MM/DD/briefing.mp3`, UPDATEs
+`briefings.audio_path`, appends `tts` to `stages_done`. Per ADR-012 § Stage 7
+always-ships: ANY exception in the synthesis chain catches → writes
+`silent_placeholder_mp3()` (1s of stdlib-`wave` silence inside the `.mp3` extension;
+HTML5 audio content-sniffs and plays it fine).
+
+`PiperPythonClient` uses the ADR-010-amended `from piper import PiperVoice` API
+(NO subprocess, NO binary in PATH) — loads the ONNX voice once in the constructor,
+calls `voice.synthesize_wav(text, wav_file)` per chunk (the canonical method in
+piper-tts==1.4.2; ADR-010's amendment example showed an outdated `synthesize(text, f)`
+signature, the actual API uses `synthesize_wav`). Synchronous Piper call wrapped in
+`asyncio.to_thread` + `asyncio.wait_for(timeout=60s)`. `FakePiper` returns
+deterministic silent WAV bytes; `FailingPiper` raises on every call.
+
+Synthesizer constructor: `(db, piper, briefings_root)` positional + keyword-only
+optional `mp3_encoder` (defaults to `wav_to_mp3`). Tests inject a tiny fake encoder
+returning `b"FAKE_MP3:..."` so the happy-path test runs on ffmpeg-less machines.
+Real `wav_to_mp3` roundtrip test gated on `shutil.which("ffmpeg")` — skips one test
+on this environment.
+
+pyproject.toml gains `piper-tts>=1.4.2`, `pydub>=0.25.1`, and `audioop-lts>=0.2.2`
+conditional on Python 3.13+ (Python 3.13 removed the stdlib `audioop` module that
+pydub depends on; the `-lts` backport is the maintained drop-in). Settings +
+config.toml updated: `piper_voice_path` default points at
+`C:/Users/senso/AppData/Local/piper/voices/tr_TR-dfki-medium.onnx` (forward-slash
+form; the path written by `scripts/install_windows.ps1`).
+
+70 new tests across `tests/test_tts/`: 23 extractor (voiced/skipped section assertions,
+Kaynaklar stripping, degraded inputs), 17 preprocessor (acronym/DEFCON/markdown/source
+line/whitespace integration), 8 piper (FakePiper + FailingPiper + monkey-patched
+`PiperVoice.load` so the real ONNX is never touched), 4 transitions (WAV format,
+duration, cache identity), 7 encoder (concatenate happy/empty/order/format-mismatch +
+ffmpeg-gated MP3 roundtrip), 11 synthesizer (happy path, piper failure → placeholder,
+encoder failure → placeholder, missing briefings row, idempotent rerun, stages_done,
+placeholder WAV validity). Full suite: 513 passed, 2 skipped (zero regressions; +69
+passed, +1 skipped for the ffmpeg-gated case). Ruff clean.
+
+**Phase 3 (delivery) begins · TTS is the first delivery-side stage. Pipeline runner
+(step 17), liveness probe (step 18), and dashboard (step 19+) follow.**
+
 ## Next
 
-Step 14 · `musahit/tts/` — Piper TTS audio synthesis per ADR-010. Reads
-`briefing.md`, extracts the voiced scope (header + DEFCON 1-2 + DEFCON 3 + AÇIK
-GELİŞMELER per ADR-009 § TTS scope), invokes `piper-tts` to produce
-`briefings/YYYY/MM/DD/briefing.mp3`, updates `briefings.audio_path`. No LLM call.
-Local subprocess to Piper; tests use a fake Piper invocation that writes a placeholder
-mp3 byte string.
+Step 15 — see BOOTSTRAP.md build order. The TTS module is wired and FILE-PROTECTED
+adjacent (no changes to the protected list yet).

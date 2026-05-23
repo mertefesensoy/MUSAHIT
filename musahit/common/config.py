@@ -67,8 +67,13 @@ class Settings(BaseSettings):
     logs_dir: Path = Path("logs")
     data_dir: Path = Path("data")
 
-    # --- Piper TTS (ADR-010) ---
-    piper_voice_path: Path = Path("voices/tr_TR-dfki-medium.onnx")
+    # --- Piper TTS (ADR-010, amended 2026-05-23: piper-tts Python package) ---
+    # Default points to the per-user install location written by
+    # scripts/install_windows.ps1 ($env:LOCALAPPDATA\piper\voices). The
+    # operator may override via config.toml or PIPER_VOICE_PATH env var.
+    piper_voice_path: Path = Path(
+        "C:/Users/senso/AppData/Local/piper/voices/tr_TR-dfki-medium.onnx"
+    )
 
     # --- Ollama (ADR-002) ---
     ollama_base_url: str = "http://localhost:11434"

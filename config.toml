@@ -7,8 +7,9 @@ briefings_dir = "briefings"
 logs_dir = "logs"
 data_dir = "data"
 
-# Piper TTS voice model
-piper_voice_path = "voices/tr_TR-dfki-medium.onnx"
+# Piper TTS voice model (ADR-010 amended 2026-05-23)
+# Default install path written by scripts/install_windows.ps1 ($env:LOCALAPPDATA\piper\voices).
+piper_voice_path = "C:/Users/senso/AppData/Local/piper/voices/tr_TR-dfki-medium.onnx"
 
 # Ollama
 ollama_base_url = "http://localhost:11434"

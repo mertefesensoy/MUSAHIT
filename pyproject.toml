@@ -24,7 +24,13 @@ dependencies = [
     "selectolax>=0.3",
     "markdown-it-py>=3.0",
     "python-multipart>=0.0.9",
-    # piper-tts installed separately via scripts/install_windows.ps1
+    # TTS (ADR-010 amended 2026-05-23 · Python package · NO subprocess)
+    "piper-tts>=1.4.2",
+    # MP3 encoding · ffmpeg must be in PATH at runtime (operator install)
+    "pydub>=0.25.1",
+    # Python 3.13 removed the stdlib audioop module that pydub depends on.
+    # The audioop-lts package is the maintained backport — required for 3.13+.
+    "audioop-lts>=0.2.2; python_version >= '3.13'",
 ]
 
 [project.optional-dependencies]

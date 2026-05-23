@@ -5,6 +5,14 @@
 **Supersedes** · none
 **Cross-references** · ADR-009 · ADR-011
 
+> **Amended** · 2026-05-23 · Piper integration path updated to Python
+> package (`pip install piper-tts`) per the OHF-Voice/piper1-gpl
+> upstream change · the original ADR-010 subprocess-binary approach
+> referenced the archived rhasspy/piper project · v1.4.2 is current as
+> of April 2026 · license changed from MIT to GPL-3.0 (no impact for
+> personal use · would impose GPL obligations if MÜŞAHİT were ever
+> redistributed)
+
 ---
 
 ## ❯ Context
@@ -34,29 +42,29 @@ HTML dashboard.
 
 ### Installation
 
-The install script downloads the voice model:
+Install the Python package and download the voice model:
 
 ```powershell
-# Inside scripts/install_windows.ps1
+pip install piper-tts
+
 $voiceDir = "$env:LOCALAPPDATA\piper\voices"
 New-Item -ItemType Directory -Force -Path $voiceDir
-Invoke-WebRequest `
-    -Uri "https://huggingface.co/rhasspy/piper-voices/resolve/main/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx" `
-    -OutFile "$voiceDir\tr_TR-dfki-medium.onnx"
-Invoke-WebRequest `
-    -Uri "https://huggingface.co/rhasspy/piper-voices/resolve/main/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx.json" `
-    -OutFile "$voiceDir\tr_TR-dfki-medium.onnx.json"
+Invoke-WebRequest -Uri "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx" -OutFile "$voiceDir\tr_TR-dfki-medium.onnx"
+Invoke-WebRequest -Uri "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx.json" -OutFile "$voiceDir\tr_TR-dfki-medium.onnx.json"
 ```
 
-Python integration via `piper-tts` package:
+Python integration (canonical path — no subprocess invocation):
 
 ```python
 from piper import PiperVoice
 
 voice = PiperVoice.load("path/to/tr_TR-dfki-medium.onnx")
-with open("briefing.wav", "wb") as f:
+with open("output.wav", "wb") as f:
     voice.synthesize(text, f)
 ```
+
+No subprocess. No binary in PATH. The Python API is the canonical
+integration.
 
 ### Pipeline integration
 
@@ -175,3 +183,8 @@ ships even when components fail.
   supports `playbackRate` · trivial addition · likely add in dashboard polish round
 - Whether the operator wants a Bluetooth speaker auto-play at 07:00 via Windows audio
   routing · this is operator-side configuration, not in scope for the system
+- Subprocess fallback for Piper · no longer relevant since the Python API
+  (`piper-tts` package per the 2026-05-23 amendment) is the supported path · if the
+  Python API ever has limitations the test surface surfaces, revisit · do NOT
+  silently switch back to subprocess invocation against the archived
+  rhasspy/piper binary

@@ -1,0 +1,169 @@
+"""Tests for musahit.tts.preprocessor."""
+
+from __future__ import annotations
+
+from musahit.tts.preprocessor import (
+    ABBREVIATIONS,
+    DEFCON_TR_NUMBERS,
+    preprocess_for_tts,
+)
+
+# ── Abbreviation expansion ─────────────────────────────────────────────────
+
+
+class TestAbbreviationExpansion:
+    def test_tcmb_expanded(self) -> None:
+        out = preprocess_for_tts("TCMB faiz kararını açıkladı.")
+        assert "TCMB" not in out
+        assert ABBREVIATIONS["TCMB"] in out
+
+    def test_bddk_expanded(self) -> None:
+        out = preprocess_for_tts("BDDK denetim raporu yayımladı.")
+        assert "BDDK" not in out
+        assert ABBREVIATIONS["BDDK"] in out
+
+    def test_partial_match_not_expanded(self) -> None:
+        # "TBMM" should expand but "TCMBANK" (made up) should NOT — the
+        # regex uses word boundaries.
+        out = preprocess_for_tts("TBMM ve TCMBANK")
+        assert ABBREVIATIONS["TBMM"] in out
+        assert "TCMBANK" in out  # untouched — not in dictionary, no \b match
+
+    def test_lowercase_acronym_not_expanded(self) -> None:
+        # Acronyms in MÜŞAHİT's output are always uppercase. Lowercase
+        # "tcmb" in a quote should NOT be expanded — case-sensitive.
+        out = preprocess_for_tts("alıntıdaki tcmb metni")
+        assert "tcmb" in out
+
+    def test_multiple_acronyms_all_expanded(self) -> None:
+        out = preprocess_for_tts("TBMM ve AYM birlikte karar verdi.")
+        assert "TBMM" not in out
+        assert "AYM" not in out
+
+
+# ── DEFCON Turkish numbering ───────────────────────────────────────────────
+
+
+class TestDefconNumbering:
+    def test_defcon_2_to_iki(self) -> None:
+        out = preprocess_for_tts("DEFCON 2 seviyesinde değerlendirildi.")
+        assert "DEFCON 2" not in out
+        assert "DEFCON İki" in out
+
+    def test_defcon_5_to_bes(self) -> None:
+        out = preprocess_for_tts("DEFCON 5 olarak işaretlendi.")
+        assert "DEFCON Beş" in out
+
+    def test_all_defcon_levels_have_turkish(self) -> None:
+        for n in (1, 2, 3, 4, 5):
+            out = preprocess_for_tts(f"DEFCON {n}")
+            assert DEFCON_TR_NUMBERS[n] in out
+
+    def test_defcon_with_no_numeral_left_alone(self) -> None:
+        out = preprocess_for_tts("DEFCON ölçeği aşağıdadır.")
+        # No numeric → no rewrite.
+        assert "DEFCON ölçeği" in out
+
+
+# ── Markdown stripping ─────────────────────────────────────────────────────
+
+
+class TestMarkdownStripping:
+    def test_bold_removed(self) -> None:
+        out = preprocess_for_tts("**Önemli** bilgi")
+        assert "**" not in out
+        assert "Önemli bilgi" in out
+
+    def test_italic_removed(self) -> None:
+        out = preprocess_for_tts("*vurgulu* sözcük")
+        assert "vurgulu sözcük" in out
+
+    def test_links_become_label_text(self) -> None:
+        out = preprocess_for_tts("[bağlantı metni](https://example.com)")
+        assert "bağlantı metni" in out
+        assert "example.com" not in out
+
+    def test_headers_stripped(self) -> None:
+        out = preprocess_for_tts("# Başlık\n## Alt başlık\nGövde")
+        assert "Başlık" in out
+        assert "Alt başlık" in out
+        assert "Gövde" in out
+        assert "#" not in out
+
+    def test_horizontal_rules_removed(self) -> None:
+        out = preprocess_for_tts("Önce\n\n---\n\nSonra")
+        assert "---" not in out
+
+    def test_arrow_marker_stripped(self) -> None:
+        out = preprocess_for_tts("❯ Bir bölüm")
+        assert "❯" not in out
+
+
+# ── Source attribution removal ─────────────────────────────────────────────
+
+
+class TestSourceLineRemoval:
+    def test_kaynaklar_line_removed_with_bold(self) -> None:
+        text = "Olay özeti.\n\n**Kaynaklar** · sabah·gov_aligned · sozcu·opposition"
+        out = preprocess_for_tts(text)
+        assert "Kaynaklar" not in out
+        assert "sabah" not in out
+        # Body should still be there.
+        assert "Olay özeti" in out
+
+    def test_kaynaklar_without_bold(self) -> None:
+        text = "Olay özeti.\nKaynaklar · ntv·centrist"
+        out = preprocess_for_tts(text)
+        assert "Kaynaklar" not in out
+        assert "ntv" not in out
+
+
+# ── Whitespace handling ────────────────────────────────────────────────────
+
+
+class TestWhitespace:
+    def test_blank_lines_collapsed(self) -> None:
+        # Three+ blank lines should collapse to one blank line.
+        out = preprocess_for_tts("Önce.\n\n\n\n\nSonra.")
+        assert "\n\n\n" not in out
+        assert "Önce" in out
+        assert "Sonra" in out
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert preprocess_for_tts("") == ""
+
+    def test_whitespace_only_returns_empty(self) -> None:
+        # All-markdown content with no payload words → empty after strip.
+        assert preprocess_for_tts("---\n\n---") == ""
+
+
+# ── Order-of-operations integration ────────────────────────────────────────
+
+
+class TestIntegratedFlow:
+    def test_realistic_briefing_chunk(self) -> None:
+        text = "\n".join(
+            [
+                "## ❯ DEFCON 1-2 · ÖNCELİKLİ",
+                "",
+                "### Olay Başlığı",
+                "**DEFCON** · ŞİDDETLİ · **Kategori** · YARGI",
+                "",
+                "TCMB ve BDDK ortak açıklama yaptı.",
+                "",
+                "**Kaynaklar** · sabah·gov_aligned · cumhuriyet·opposition",
+            ]
+        )
+        out = preprocess_for_tts(text)
+        # Markdown stripped, abbreviations expanded, source line gone.
+        assert "**" not in out
+        assert "##" not in out
+        assert "❯" not in out
+        assert "TCMB" not in out
+        assert ABBREVIATIONS["TCMB"] in out
+        assert "BDDK" not in out
+        assert ABBREVIATIONS["BDDK"] in out
+        assert "Kaynaklar" not in out
+        # Headline and body still there.
+        assert "Olay Başlığı" in out
+        assert "ortak açıklama yaptı" in out
