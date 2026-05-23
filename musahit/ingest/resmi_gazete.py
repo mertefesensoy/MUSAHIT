@@ -280,6 +280,10 @@ class ResmiGazeteIngester:
             "reference_number": item.reference_number,
             "mukerrer": mukerrer,
             "title": item.title,
+            # Body lives in headers JSON rather than re-parsing the PDF in
+            # the normalize stage. The normalize PDF extractor reads this
+            # directly and applies whitespace normalisation.
+            "body": item.body,
         }
         feed_entry_id = item.reference_number or None
 

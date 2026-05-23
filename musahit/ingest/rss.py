@@ -216,10 +216,26 @@ class RssIngester:
 
             row_id = article_id(source.id, url)
             canonical_ts = _canonical_timestamp(entry)
+            # Body extraction for the normalize stage: prefer content:encoded
+            # (feedparser exposes as entry.content list), then description,
+            # then summary. The normalize RSS extractor runs trafilatura on
+            # this value when it detects HTML markup.
+            entry_content = entry.get("content") or []
+            content_body = ""
+            if entry_content:
+                first = entry_content[0]
+                content_body = first.get("value", "") if isinstance(first, dict) else ""
+            body = (
+                content_body
+                or entry.get("description", "")
+                or entry.get("summary", "")
+                or ""
+            )
             ingester_metadata = {
                 # RSS-specific metadata — per ADR-015 examples.
                 "title": entry.get("title"),
                 "summary": entry.get("summary"),
+                "body": body,
                 "author": entry.get("author"),
                 # Raw feed timestamp strings, kept for audit/debug; the
                 # canonical value lives in the typed column.
