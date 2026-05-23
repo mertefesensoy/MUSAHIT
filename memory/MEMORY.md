@@ -64,6 +64,63 @@ Apply to **both** the matched text and any vocabulary/pattern before
 comparing. Used today in `musahit/normalize/entities.py`; reuse the
 helper there for any new locale-aware matching.
 
+### ADR semantic intent overrides formula text
+
+When ADR prose and formula disagree, trace through worked examples to
+identify which matches the ADR's stated purpose · the disagreeing side
+is the bug · file an ADR amendment.
+
+Discovered when ADR-005's `min(raw, ceiling)` formula was found to not
+enforce the ceiling as a severity cap despite the prose claiming it did.
+The implementation faithfully encoded the formula; the tests validated
+the formula against itself; neither caught the bug because neither
+checked against the three semantic intents (X cap · single-band cap ·
+primary non-auto-promotion). The 2026-05-23 amendment switched the
+formula to `max(raw, ceiling)` and recomputed every pinned test value.
+
+Process for the next discovery:
+
+1. Write the disagreement out as a table — columns: input, current
+   formula result, alternative formula result, ADR-intended result.
+2. The column matching the ADR's stated purpose is the correct formula.
+3. The other formula is the bug — file an ADR amendment.
+4. Update the implementation, walk every test that pins a derived
+   value, and recompute under the corrected formula. Add inline
+   comments on each updated assertion explaining the new direction.
+5. Do NOT weaken assertions to make tests pass. If a test resists
+   the change, that's evidence the ADR's stated semantics are more
+   complex than the three cases — surface it before committing.
+
+
+### DuckDB FK Update Pattern
+
+DuckDB enforces foreign key constraints on UPDATE statements even
+outside explicit transactions. This means `UPDATE clusters SET ...
+WHERE id = ?` fails when `cluster_articles` or `cluster_embeddings`
+rows reference that `cluster_id` · the FK check fires on the update
+itself, not at commit time.
+
+The pattern when updating a parent row that has active FK children:
+
+    DELETE FROM child_table WHERE parent_id = ?
+    UPDATE parent_table SET ... WHERE id = ?
+    INSERT INTO child_table VALUES ?, ?, ...
+
+Each statement auto-commits. No explicit `BEGIN`/`COMMIT`. Inside a
+transaction the FK check still fires · the workaround does not need
+transaction semantics because DuckDB handles per-statement atomicity.
+
+Applies to:
+
+* `clusters` update when `cluster_articles` or `cluster_embeddings`
+  rows reference it (step 11 · step 12)
+* `arcs` update when `arc_centroids` references it (step 12)
+* any future parent table update with active child references
+
+Discovered in step 11 · documented in
+`docs/implementations/2026-05-23-score.md`.
+
+
 ### ADR-016 trigger: vocabulary-vs-transformer NER
 
 The current entity tagger (step 9) uses a curated vocabulary instead of

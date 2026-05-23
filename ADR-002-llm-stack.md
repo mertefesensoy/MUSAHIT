@@ -5,6 +5,13 @@
 **Supersedes** · none
 **Cross-references** · ADR-001 · ADR-005 · ADR-009
 
+> **Amended** · 2026-05-23 · writer model version updated to
+> Trendyol-LLM 7B chat v1.8 (the latest publicly available Trendyol
+> release as of May 2026) · pulled directly from Ollama Hub via
+> `serkandyck/trendyol-llm-7b-chat-v1.8-gguf` · no manual GGUF download
+> or Modelfile import needed · the original ADR-002 specification of
+> v4 was based on an assumption that did not hold
+
 ---
 
 ## ❯ Context
@@ -32,10 +39,10 @@ between stages.
 - **Invocation** · 100-500 calls per night · structured prompts demanding strict JSON ·
   temperature 0.1 · max output 512 tokens
 
-### Writer model · Trendyol-LLM 7B v4
+### Writer model · Trendyol-LLM 7B chat v1.8
 
 - **Role** · final Turkish briefing prose generation · called once per night
-- **Quantization** · Q4_K_M · imported from HuggingFace GGUF via Ollama Modelfile
+- **Quantization** · Q4_K_M · pulled directly from Ollama Hub: `serkandyck/trendyol-llm-7b-chat-v1.8-gguf`
 - **Why** · trained on Turkish corpora · native Turkish phrasing · the briefing reads like
   it was written by a Turkish speaker · the writer model needs to produce idiomatic prose
   the operator will read every morning
@@ -82,12 +89,11 @@ Models are pulled by `scripts/pull_models.ps1`. The script must complete before 
 ```powershell
 ollama pull qwen2.5:7b-instruct-q4_K_M
 ollama pull bge-m3:latest
-# Trendyol-LLM via Modelfile import from HF
-ollama create trendyol-llm-7b-q4 -f Modelfile.trendyol
+ollama pull serkandyck/trendyol-llm-7b-chat-v1.8-gguf
 ```
 
-The Modelfile for Trendyol references the GGUF blob downloaded from HuggingFace
-(`Trendyol/Trendyol-LLM-7b-chat-v4-GGUF` or its v4 equivalent at scaffold time).
+All three models pull directly from Ollama Hub. No HuggingFace GGUF download, no
+Modelfile authoring required for any of them.
 
 ## ❯ Consequences
 
@@ -120,7 +126,10 @@ The Modelfile for Trendyol references the GGUF blob downloaded from HuggingFace
 
 ## ❯ Open questions
 
-- Trendyol-LLM availability at scaffold time · if v4 has been deprecated, fall through to
-  the latest Trendyol model or Cosmos LLaMa per the fallback list
+- Trendyol-LLM v1.8 is the current publicly-available version. If Trendyol publishes a
+  newer public release (v2.x or beyond), the writer model string in code should be
+  updated and this ADR amended again. Fallback per ADR-002 alternatives section remains
+  Cosmos LLaMa (`ytu-ce-cosmos/Turkish-Llama-8b-Instruct-v0.1-GGUF`) if Trendyol prose
+  quality proves insufficient.
 - Quantization choice · Q4_K_M is the default · Q5_K_M is preferable if RAM allows · the
   install script attempts Q5 first and falls back to Q4

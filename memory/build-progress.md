@@ -203,10 +203,80 @@ MEMORY.md: FILE-PROTECTED list now includes `score/defcon.py` and `score/promoti
 DuckDB FK gotcha documented in impl doc: UPDATE on referenced row fires FK check;
 workaround is per-statement auto-commit DELETE+UPDATE+reINSERT (NOT inside a transaction).
 
+### Between step 11 and step 12 · ADR-005 prose correction · 2026-05-23
+
+ADR-005's "the ceiling can only *lower* the worker's raw score · it cannot raise it"
+sentence was rewritten to remove the directional ambiguity. The implementation was
+unchanged (final_defcon = min(raw, ceiling) is still the formula); only the prose
+explaining the formula was updated to describe the IntEnum direction explicitly.
+Amendment block added at the top of ADR-005 following the ADR-006-amended-by-014/015
+precedent. No code change; no test change.
+
+### Between step 11 and step 12 · DuckDB FK Update Pattern convention · 2026-05-23
+
+Added the "DuckDB FK Update Pattern" project convention to `memory/MEMORY.md`. Documents
+the DELETE-child → UPDATE-parent → INSERT-child workaround discovered in step 11 for
+`UPDATE clusters` when `cluster_articles`/`cluster_embeddings` reference it. Each
+statement auto-commits (no explicit `BEGIN`/`COMMIT`); inside a transaction the FK check
+still fires. Applies to `clusters`, the upcoming `arcs` updates in step 12, and any
+future parent-with-active-children update. No code change; documentation only.
+
+### Between step 11 and step 12 · ADR-005 formula correction · 2026-05-23
+
+**Supersedes the prose-only amendment above.** The prose amendment surfaced a worked-
+example contradiction: the new prose described `max(raw, ceiling)` behavior but the
+formula text and the implementation both used `min(raw, ceiling)`. Tracing through the
+three semantic intents (X-only cap at DEFCON 4 · single-band cap at DEFCON 4 · primary
+sources don't auto-promote routine events to UNTHINKABLE), `max` is what ADR-005 actually
+requires. Implementation in `musahit/score/promotion.py::final_defcon` switched to `max`.
+Updated: `tests/test_promotion.py::TestFinalDefcon` (renamed test method + 4 new
+assertions for max-formula cases), `tests/test_classifier.py` (three pinned `final_defcon`
+assertions recomputed under max; the bootstrap-demotion case stayed unchanged because
+raw and ceiling were equal). Full suite: 363 passed, 1 skipped (zero regressions).
+MEMORY.md gained an "ADR semantic intent overrides formula text" convention with the
+process for the next discovery.
+
+### Step 12 · `musahit/arcs/` · 2026-05-23
+
+Story arc linking. `ArcLinker.run(run_id)` reads scored clusters without arc_id ordered
+by final_defcon ASC (lower int = more severe seeds first), loads OPEN+WATCH arcs from
+last 30 days into memory, and matches each cluster via cosine ≥ 0.55 AND Jaccard ≥ 0.4
+(stopword-filtered entity sets). Match: update cluster.arc_id, refresh arc fields and
+arc_centroids; WATCH → OPEN on re-link. No match: seed `arc_YYYYMMDD_NNNN`. Cleanup pass
+`transition_states(conn, now)` runs at end: OPEN > 7d → WATCH; WATCH > 30d → RESOLVED;
+RESOLVED never auto-transitions. peak_defcon update uses MIN (lower int = more severe;
+ADR-008's "max" prose is the same bug pattern as ADR-005 had — implementation matches
+intent; ADR-008 prose amendment queued). FK workaround applied at both cluster and arc
+UPDATEs (DELETE child → UPDATE parent → re-INSERT child, per-statement auto-commit;
+clusters pointing at the arc being updated get nulled then restored using the
+cluster-level workaround). Stopword list (`STOPWORD_ENTITIES`) prevents the "every
+political cluster matches every other" collapse. 34 new tests across 3 files (matching:17,
+transitions:9, linker:10). Full suite: 397 passed, 1 skipped.
+
+### Between step 12 and step 13 · ADR-002 amendment · 2026-05-23
+
+Writer-model version corrected in ADR-002 ahead of step 13. The original spec assumed
+Trendyol-LLM 7B v4 (GGUF + Modelfile import from HuggingFace), but v4 does not exist
+publicly. The latest publicly-available Trendyol chat release is v1.8 (mid-2025),
+published on Ollama Hub by community maintainer serkandyck as
+`serkandyck/trendyol-llm-7b-chat-v1.8-gguf` (4.4 GB, 32K context, pullable with a
+single `ollama pull`). Amendment block at top of ADR-002; Writer-model section + Installation
+section + Open-questions item all updated. Step 13 will reference the corrected model
+string from the start. No code change (writer not yet built).
+
+### Between step 12 and step 13 · ADR-008 prose amendment · 2026-05-23
+
+ADR-008's `peak_defcon` prose ("highest DEFCON ever seen") was clarified to remove the
+same IntEnum-direction ambiguity that ADR-005 had. Amendment block added at the top;
+the data-model comment now says "highest severity (= lowest integer) ever seen"; the
+Arc-updates formula now reads `min(arc.peak_defcon, cluster.final_defcon)` with the
+directional reasoning inline. No code change; no test change. The flagged bug from the
+step-12 impl doc is now closed.
+
 ## Next
 
-Step 12 · `musahit/arcs/` — story arc linking. Reads clusters from this run with
-final_defcon, computes cosine vs existing arc centroids (from arc_centroids table),
-joins arc if ≥ 0.55 cosine + ≥ 0.4 jaccard on entity sets within 30-day window, else
-creates new arc. Reuses FakeEmbeddingClient pattern for tests. Updates arcs.state
-transitions (OPEN → WATCH → RESOLVED per ADR-008).
+Step 13 · `musahit/score/promotion.py` already exists (built in step 11); next is
+step 13 in BOOTSTRAP.md sequence — `musahit/writer/` Trendyol-LLM briefing renderer.
+The writer reads arcs + clusters + promotion_log and emits the markdown briefing per
+ADR-009. First Trendyol-LLM stage; reuses the LlmClient Protocol from step 11 with a
+new FakeLlmClient instance for tests.

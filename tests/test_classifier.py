@@ -190,8 +190,9 @@ class TestHappyPath:
         # 3 bands across 2 sides (bianet=independent → neutral, cumhuriyet=opposition,
         # sabah=gov_aligned → gov) → 3 sides → ACUTE ceiling.
         assert ceiling == int(DEFCON.ACUTE)
-        # min(2, 1) = 1 (ACUTE).
-        assert final == int(DEFCON.ACUTE)
+        # max(raw=2, ceiling=1) = 2 (SEVERE). Worker's claim stands; the
+        # ACUTE ceiling permits more severe but doesn't force it.
+        assert final == int(DEFCON.SEVERE)
         # confidence: 2+ sides BUT only 3 sources → ORTA (needs 4+ for YUKSEK).
         assert conf == Confidence.ORTA.value
         assert headline == "Test başlığı"
@@ -223,9 +224,10 @@ class TestHappyPath:
         raw, ceil, final, bands, sides, conf, rule, computed = log_row
         assert raw == int(DEFCON.MATERIAL)
         assert ceil == int(DEFCON.ROUTINE)  # single band → ROUTINE ceiling
-        # min(raw=3, ceiling=4) = 3 → MATERIAL. First pipeline run is months
-        # before cluster_date so no bootstrap demotion applies.
-        assert final == int(DEFCON.MATERIAL)
+        # max(raw=3, ceiling=4) = 4 → ROUTINE. Worker says MATERIAL but a
+        # single band can only support ROUTINE; ceiling caps severity.
+        # First pipeline run is months before cluster_date so no bootstrap.
+        assert final == int(DEFCON.ROUTINE)
         assert rule == "single_band"
         assert json.loads(bands) == ["independent"]
         assert "neutral" in json.loads(sides)
@@ -287,9 +289,10 @@ class TestRetryOnMalformedJson:
         # Fallback shape: AMBIENT + UNCLASSIFIED + low.
         assert raw == int(DEFCON.AMBIENT)
         assert cat == Category.UNCLASSIFIED.value
-        # raw=5 (AMBIENT), single band ceiling=4 (ROUTINE), min(5,4) = 4 (ROUTINE).
-        # No bootstrap → final stays at ROUTINE.
-        assert final == int(DEFCON.ROUTINE)
+        # raw=5 (AMBIENT), single band ceiling=4 (ROUTINE), max(5,4) = 5 (AMBIENT).
+        # The ceiling does not escalate worker-noise to routine — fallback
+        # noise stays noise. No bootstrap demotion applies (already at AMBIENT).
+        assert final == int(DEFCON.AMBIENT)
 
 
 # ── TestBootstrapDemotion ──────────────────────────────────────────────────
@@ -318,8 +321,9 @@ class TestBootstrapDemotion:
             "WHERE id = 'cl_20260523_0005'"
         ).fetchone()
         raw, ceiling, final = row
-        # raw=1 (ACUTE), ceiling=1 (ACUTE per 3 bands 2 sides), min=1.
-        # Bootstrap demotion: 1 → 2 (SEVERE).
+        # raw=1 (ACUTE), ceiling=1 (ACUTE per 3 bands 2 sides), max(1,1)=1.
+        # Bootstrap demotion: 1 → 2 (SEVERE). Final unchanged from the
+        # min→max formula switch in this case because raw and ceiling are equal.
         assert raw == int(DEFCON.ACUTE)
         assert ceiling == int(DEFCON.ACUTE)
         assert final == int(DEFCON.SEVERE)

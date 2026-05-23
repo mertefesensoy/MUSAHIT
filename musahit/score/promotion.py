@@ -21,8 +21,10 @@ The flow is deterministic — no LLM in the loop here:
    tier toward AMBIENT.
 
 Numeric direction note: in our :class:`DEFCON` IntEnum lower numbers
-mean MORE severe. The ADR-005 formula is :func:`min`. See the cluster
-implementation doc for the directional gotcha and tracking issue.
+mean MORE severe. The ADR-005 formula (corrected 2026-05-23) is
+:func:`max` — the ceiling acts as a *severity cap*, not an escalator,
+so taking the LESS severe (higher integer) of raw and ceiling is what
+enforces the cap. See :func:`final_defcon` for examples.
 """
 
 from __future__ import annotations
@@ -106,13 +108,30 @@ def confidence(
 
 
 def final_defcon(raw: DEFCON | int, ceiling: DEFCON | int) -> DEFCON:
-    """``DEFCON(min(raw, ceiling))`` per ADR-005.
+    """``DEFCON(max(raw, ceiling))`` per ADR-005 (2026-05-23 amendment).
+
+    Reads as: final cannot be more severe than the corroboration ceiling
+    supports. Since lower integers are more severe, ``max`` enforces this
+    by taking whichever rating is LESS severe (higher integer).
+
+    Examples:
+      * raw=SEVERE(2), ceiling=ROUTINE(4) → max=4 (ceiling caps at routine)
+      * raw=AMBIENT(5), ceiling=ROUTINE(4) → max=5 (worker noise stays noise;
+        ceiling does NOT escalate)
+      * raw=ROUTINE(4), ceiling=ACUTE(1) → max=4 (worker's routine call stands;
+        ceiling permits more severe but worker didn't claim it)
 
     Both operands are coerced through ``int(...)`` so a caller may pass
     raw integers (e.g. a worker response's ``.defcon`` field) without
     constructing :class:`DEFCON` first.
+
+    UNTHINKABLE override gate: this function may return ``DEFCON.UNTHINKABLE``
+    when both raw and ceiling are 0. The writer/dashboard layer is the
+    authority that gates surfacing UNTHINKABLE to the briefing — it reads
+    :data:`DEFCON_REQUIRES_OVERRIDE` and requires a manual override flag in
+    ``manual_overrides``. This function does not implement that gate.
     """
-    return DEFCON(min(int(raw), int(ceiling)))
+    return DEFCON(max(int(raw), int(ceiling)))
 
 
 # ── Bootstrap demotion ─────────────────────────────────────────────────────

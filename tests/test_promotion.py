@@ -149,15 +149,30 @@ class TestConfidence:
 
 
 class TestFinalDefcon:
-    def test_returns_min_per_adr_005(self) -> None:
-        # Per ADR-005 the formula is min(raw, ceiling).
-        assert final_defcon(DEFCON.AMBIENT, DEFCON.ROUTINE) is DEFCON.ROUTINE
-        assert final_defcon(DEFCON.ROUTINE, DEFCON.AMBIENT) is DEFCON.ROUTINE
-        assert final_defcon(DEFCON.MATERIAL, DEFCON.ACUTE) is DEFCON.ACUTE
-        assert final_defcon(DEFCON.ACUTE, DEFCON.UNTHINKABLE) is DEFCON.UNTHINKABLE
+    def test_returns_max_per_adr_005(self) -> None:
+        # Per ADR-005 (2026-05-23 amendment) the formula is max(raw, ceiling).
+        # Lower DEFCON integers = more severe; max takes the LESS severe of
+        # the two, enforcing the ceiling as a cap on severity.
+
+        # raw=ACUTE(1) · ceiling=MATERIAL(3) → final=MATERIAL(3)
+        # Worker says severe; only 2 bands support material; severity capped.
+        assert final_defcon(DEFCON.ACUTE, DEFCON.MATERIAL) is DEFCON.MATERIAL
+
+        # raw=ROUTINE(4) · ceiling=ACUTE(1) → final=ROUTINE(4)
+        # Worker says routine; ceiling allows acute but doesn't force it.
+        assert final_defcon(DEFCON.ROUTINE, DEFCON.ACUTE) is DEFCON.ROUTINE
+
+        # raw=SEVERE(2) · ceiling=ROUTINE(4) → final=ROUTINE(4)
+        # Worker over-rates; ceiling caps at routine.
+        assert final_defcon(DEFCON.SEVERE, DEFCON.ROUTINE) is DEFCON.ROUTINE
+
+        # raw=AMBIENT(5) · ceiling=ROUTINE(4) → final=AMBIENT(5)
+        # Worker says noise; ceiling does not escalate noise to routine.
+        assert final_defcon(DEFCON.AMBIENT, DEFCON.ROUTINE) is DEFCON.AMBIENT
 
     def test_accepts_int_for_raw(self) -> None:
-        assert final_defcon(2, DEFCON.ROUTINE) is DEFCON.SEVERE
+        # raw=2 (SEVERE int), ceiling=ROUTINE(4) → max(2,4) = 4 = ROUTINE.
+        assert final_defcon(2, DEFCON.ROUTINE) is DEFCON.ROUTINE
 
 
 # ── UNTHINKABLE requires override ──────────────────────────────────────────

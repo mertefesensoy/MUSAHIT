@@ -3,7 +3,13 @@
 **Status** · Accepted · 2026-05-22
 **Author** · Mert Efe Şensoy
 **Supersedes** · none
-**Cross-references** · ADR-004 · ADR-006 · ADR-009
+**Cross-references** · ADR-004 · ADR-005 · ADR-006 · ADR-009
+
+> **Amended** · 2026-05-23 · prose clarification on peak_defcon
+> directionality · the prose "highest DEFCON ever seen" is correct
+> semantically (highest severity) but reads ambiguously given the
+> IntEnum direction · implementation always used min(peak, cluster)
+> which matches the semantic intent · only the prose is clarified
 
 ---
 
@@ -45,7 +51,11 @@ class Arc:
     state: ArcState
     last_update_at: datetime
     category: Category     # primary category · POLİTİKA · EKONOMİ · etc.
-    peak_defcon: DEFCON    # highest DEFCON ever seen in this arc
+    peak_defcon: DEFCON    # highest severity (= lowest integer) ever
+                           # seen in this arc · updated via
+                           # min(current_peak, new_cluster_final) since
+                           # lower integers mean higher severity per
+                           # ADR-005
     entity_set: set[str]   # core entities defining the arc (e.g., {"İmamoğlu",
                            # "İstanbul Büyükşehir", "Yargıtay"})
 ```
@@ -108,7 +118,9 @@ The cluster's `arc_id` is set to the new arc.
 When a cluster is linked to an existing arc:
 
 1. `arc.last_update_at` is updated to `cluster.created_at`
-2. `arc.peak_defcon` is updated to `max(arc.peak_defcon, cluster.final_defcon)`
+2. `arc.peak_defcon` is updated to `min(arc.peak_defcon, cluster.final_defcon)`
+   (lower integer = higher severity per ADR-005 · taking min preserves
+   the most severe rating ever seen)
 3. `arc.entity_set` is extended with new entities from the cluster
 4. `arc.centroid` is recomputed as the average of all member cluster centroids
 5. If the cluster's DEFCON is ≥ 3 OR the cluster represents a significant change, the

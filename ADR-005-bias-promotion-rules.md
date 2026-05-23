@@ -5,6 +5,12 @@
 **Supersedes** · none
 **Cross-references** · ADR-003 · ADR-004
 
+> **Amended** · 2026-05-23 · prose clarification on ceiling directionality
+> **Amended** · 2026-05-23 · formula correction · final_defcon uses
+> max(raw, ceiling) · the prior min formula was a latent bug that did
+> not enforce the ceiling as a severity cap · the implementation and
+> tests are updated in this same commit
+
 ---
 
 ## ❯ Context
@@ -76,12 +82,22 @@ def ideological_sides(bands: set[Band]) -> set[str]:
 ### Final DEFCON computation
 
 ```python
-final_defcon = min(raw_defcon, ceiling)
+final_defcon = max(raw_defcon, ceiling)
+
+# Reads as: final cannot be more severe than the corroboration ceiling
+# supports. Since lower integers are more severe, max enforces this
+# by taking whichever rating is LESS severe (higher integer).
 ```
 
-The ceiling can only *lower* the worker's raw score · it cannot raise it. This is
-intentional: a worker model scoring a routine cabinet meeting as DEFCON 2 should not be
-escalated even if it's covered by every band. Raw classification is the floor.
+The ceiling produces a *minimum allowable DEFCON integer*. Since lower DEFCON integers
+mean higher severity (DEFCON 1 is more severe than DEFCON 4), the ceiling effectively
+*caps how severe* a cluster can be rated regardless of the worker's raw classification.
+The expression `final_defcon = max(raw, ceiling)` enforces this: when the worker rates
+a cluster as DEFCON 2 (severe) but the band corroboration only supports ceiling=DEFCON 4
+(routine), the final is DEFCON 4 because the integer 4 is greater than 2 · the ceiling
+capped severity at routine despite the worker's higher rating. This is intentional: a
+worker model scoring a routine cabinet meeting as DEFCON 2 should not be escalated even
+if it's covered by every band. Raw classification is the floor.
 
 DEFCON 0 is treated specially: it requires both `raw_defcon == 0` AND a manual operator
 override. The system never auto-promotes to 0.
