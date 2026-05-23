@@ -101,9 +101,29 @@ empty). Real HTTP URL in `headers.real_pdf_url` for traceability. 38 new tests (
 + 9 ingester) using hand-crafted fixture PDFs generated once by `reportlab` (not a project
 dep). Full suite: 205 passed, 1 skipped.
 
+### Step 7 · `musahit/ingest/reddit.py` + `reddit_subreddits.py` · 2026-05-23
+
+`RedditIngester` implements the Ingester Protocol via PRAW (sync) wrapped in
+`asyncio.to_thread`. Subreddits in `musahit/ingest/reddit_subreddits.py`:
+r/Turkey, r/TurkeyJerky, r/AskTurkey, r/europe (Turkey flair required).
+Filters per ADR-003: last 24h AND (score ≥ 50 OR num_comments ≥ 25). Per-post:
+synthetic_url = `https://www.reddit.com{permalink}`; article_id via shared helper;
+feed_entry_id = post.id; canonical_timestamp = post.created_utc as naive UTC;
+raw_content = JSON {title, selftext (≤500), top-3 comments (≤200 each), author,
+score, num_comments}; headers JSON = {subreddit, score, num_comments, flair,
+external_url}. Hard cap DEFCON 4 is downstream (score stage) per ADR-005,
+NOT enforced here. `prawcore.ResponseException` → HTTP_ERROR;
+`prawcore.RequestException` → TIMEOUT. No credentials / no client / praw missing
+→ SKIPPED. 11 tests via constructor-injected `FakeRedditClient`.
+
+Also: `tr_local_date()` added to `musahit/common/time.py` (TR is UTC+3 year-round,
+no DST since 2016). `resmi_gazete.py` refactored to use it. `memory/MEMORY.md`
+extended with the "enum expansion = ADR amendment" convention. Full suite:
+219 passed, 1 skipped.
+
 ## Next
 
-Step 7 · `musahit/ingest/kap.py` — KAP (Kamuyu Aydınlatma Platformu) disclosure ingester.
-Use shared `article_id`, `utcnow`, `to_utc_naive`. KAP exposes corporate disclosures
-(quarterly reports, material events) — likely RSS or JSON API. Confirm endpoint format
-before implementing.
+Step 8 · `musahit/ingest/poller.py` (FILE-PROTECTED at commit time) — the ingest
+orchestrator. Iterates `SOURCES`, dispatches by `source.kind`, aggregates per-source
+`IngestResult` into the `ingest_log` table. Uses the shared helpers; no new
+abstractions beyond what steps 4-7 establish.
