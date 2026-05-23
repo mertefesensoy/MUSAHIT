@@ -9,7 +9,7 @@ pass so the OPEN/WATCH/RESOLVED partition reflects today.
 
 Severity direction: ``DEFCON 0`` is the most severe, ``DEFCON 5`` the
 least. ``arcs.peak_defcon`` is the smallest integer (most severe) ever
-seen in the arc — `peak` in the severity sense, NOT the integer sense.
+seen in the arc · `peak` in the severity sense, NOT the integer sense.
 Updates therefore use ``min(arc.peak_defcon, cluster.final_defcon)``.
 This is the same direction issue ADR-005 had to amend in 2026-05-23;
 ADR-008's prose still reads ``max(...)`` but the IntEnum direction
@@ -20,8 +20,18 @@ FK workaround per ``memory/MEMORY.md``: UPDATE on ``arcs`` would fire
 the FK check from ``arc_centroids`` and ``clusters`` even outside an
 explicit transaction. The workaround is DELETE child rows → UPDATE
 parent → re-INSERT, each statement auto-committing. Same pattern for
-``UPDATE clusters SET arc_id = ?`` where ``cluster_articles`` /
-``cluster_embeddings`` are children.
+``UPDATE clusters SET arc_id = ?`` where ``cluster_articles``,
+``cluster_embeddings``, and ``promotion_log`` are children.
+
+The promotion_log entry to the workaround was added on 2026-05-24
+after the first smoke run cascaded: 240 clusters all tried to seed
+``arc_20260523_0001`` because the missing promotion_log handling made
+every cluster UPDATE raise. See
+``docs/implementations/2026-05-24-arc-link-bug-fix.md``. Any future
+table whose FK targets ``clusters.id`` MUST be added to both
+:meth:`ArcLinker._update_cluster_arc_id` and
+:meth:`ArcLinker._update_cluster_arc_id_to_value` (per
+``memory/MEMORY.md`` § "DuckDB FK Update Pattern").
 """
 
 from __future__ import annotations
@@ -127,6 +137,7 @@ class ArcLinker:
         counter = self._next_arc_counter(now.date())
 
         for cluster in clusters:
+            seed_attempted = False
             try:
                 filtered_entities = filter_stopwords(cluster.entities)
                 arc_id = match_arc(
@@ -140,8 +151,8 @@ class ArcLinker:
                     self._attach_cluster(cache, arc_id, cluster, filtered_entities)
                     joined += 1
                 else:
+                    seed_attempted = True
                     new_arc = self._seed_arc(cache, cluster, filtered_entities, counter)
-                    counter += 1
                     seeded += 1
                     log.debug("arc_link_new", arc_id=new_arc.id, cluster_id=cluster.id)
             except Exception as exc:
@@ -151,6 +162,16 @@ class ArcLinker:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 errors += 1
+            finally:
+                # Advance the counter whether _seed_arc succeeded or raised.
+                # A failed seed still consumes its arc_id (manual rollback in
+                # _seed_arc removes the orphan arc + arc_centroids rows). If
+                # the counter stayed put on failure, every subsequent cluster
+                # would retry the same arc_id and the rollback path would
+                # bury the real diagnostic under duplicate-PK errors · this
+                # is exactly the cascade observed on 2026-05-23.
+                if seed_attempted:
+                    counter += 1
 
         transitions = transition_states(self._conn, now)
         self._mark_stage_done(run_id, joined, seeded, transitions)
@@ -294,13 +315,13 @@ class ArcLinker:
         joined on the updated arc_id.
 
         ``arc.peak_defcon`` is updated with ``min`` because lower DEFCON
-        integers are more severe — the *peak* (highest severity) is the
+        integers are more severe · the *peak* (highest severity) is the
         smallest integer ever assigned. ADR-008's prose says ``max`` but
         that's the same prose-bug pattern as ADR-005 had (see impl doc).
         """
         arc = cache.arcs[arc_id]
 
-        # 1) Update cluster.arc_id (FK workaround — cluster_articles +
+        # 1) Update cluster.arc_id (FK workaround · cluster_articles +
         # cluster_embeddings reference clusters.id).
         self._update_cluster_arc_id(cluster.id, arc_id)
 
@@ -309,7 +330,7 @@ class ArcLinker:
         # which clusters were already attached.
         new_centroid = self._compute_arc_centroid(arc_id)
 
-        # 3) Update arc fields (FK workaround — arc_centroids references arcs.id).
+        # 3) Update arc fields (FK workaround · arc_centroids references arcs.id).
         new_state = ArcState.OPEN if arc.state is ArcState.WATCH else arc.state
         # Severity direction: lower DEFCON integer = MORE severe. peak_defcon
         # is the most severe DEFCON ever seen in the arc → smallest integer →
@@ -342,7 +363,20 @@ class ArcLinker:
         filtered_entities: set[str],
         counter: int,
     ) -> _ArcState:
-        """Create a new OPEN arc seeded from ``cluster``."""
+        """Create a new OPEN arc seeded from ``cluster``.
+
+        DuckDB auto-commits each statement so there is no transaction
+        to roll back if the cluster's FK-workaround update fails after
+        we have already INSERTed the arc + arc_centroids rows. We
+        INSERT those first (required by
+        ``clusters.arc_id REFERENCES arcs.id``), then attempt the
+        cluster update inside a try/except · on failure we DELETE the
+        just-inserted rows by hand and re-raise so the outer loop
+        counts this as an error. The counter still advances via the
+        ``finally`` block in :meth:`run`, so the next cluster picks a
+        fresh arc_id rather than colliding on the orphan one (this is
+        the 2026-05-23 smoke-run cascade · see impl doc).
+        """
         arc_id = f"arc_{cluster.created_at.strftime('%Y%m%d')}_{counter:04d}"
         now = utcnow()
         self._conn.execute(
@@ -373,8 +407,20 @@ class ArcLinker:
             [arc_id, cluster.centroid, now],
         )
 
-        # Now link the cluster to this new arc — same FK workaround applies.
-        self._update_cluster_arc_id(cluster.id, arc_id)
+        # Now link the cluster to this new arc · same FK workaround applies.
+        # If the workaround raises (e.g. a future child table reference we
+        # have not yet wired in), DELETE the just-inserted arc rows so
+        # we leave no orphan behind before re-raising.
+        try:
+            self._update_cluster_arc_id(cluster.id, arc_id)
+        except Exception:
+            self._conn.execute(
+                "DELETE FROM arc_centroids WHERE arc_id = ?", [arc_id]
+            )
+            self._conn.execute(
+                "DELETE FROM arcs WHERE id = ?", [arc_id]
+            )
+            raise
 
         new_arc = _ArcState(
             id=arc_id,
@@ -394,10 +440,11 @@ class ArcLinker:
         """Set ``clusters.arc_id`` using the FK workaround pattern.
 
         DuckDB rejects ``UPDATE clusters SET arc_id = ...`` when
-        ``cluster_articles`` / ``cluster_embeddings`` reference the row.
-        Workaround: snapshot child rows, DELETE them, UPDATE, re-INSERT
-        (each statement auto-commits — no explicit transaction; see
-        ``memory/MEMORY.md`` § "DuckDB FK Update Pattern").
+        ``cluster_articles`` / ``cluster_embeddings`` / ``promotion_log``
+        reference the row. Workaround: snapshot every child row,
+        DELETE, UPDATE, re-INSERT · each statement auto-commits · no
+        explicit transaction (see ``memory/MEMORY.md`` § "DuckDB FK
+        Update Pattern").
         """
         member_articles = [
             r[0]
@@ -414,6 +461,16 @@ class ArcLinker:
             """,
             [cluster_id],
         ).fetchone()
+        promotion_row = self._conn.execute(
+            """
+            SELECT raw_defcon, ceiling_defcon, final_defcon,
+                   bands_present, sides_present, confidence,
+                   rule_applied, computed_at
+              FROM promotion_log
+             WHERE cluster_id = ?
+            """,
+            [cluster_id],
+        ).fetchone()
 
         self._conn.execute(
             "DELETE FROM cluster_articles WHERE cluster_id = ?",
@@ -421,6 +478,10 @@ class ArcLinker:
         )
         self._conn.execute(
             "DELETE FROM cluster_embeddings WHERE cluster_id = ?",
+            [cluster_id],
+        )
+        self._conn.execute(
+            "DELETE FROM promotion_log WHERE cluster_id = ?",
             [cluster_id],
         )
         self._conn.execute(
@@ -445,6 +506,19 @@ class ArcLinker:
                 """,
                 [cluster_id, embedding_row[0], embedding_row[1]],
             )
+        if promotion_row is not None:
+            self._conn.execute(
+                """
+                INSERT INTO promotion_log (
+                    cluster_id, raw_defcon, ceiling_defcon, final_defcon,
+                    bands_present, sides_present, confidence,
+                    rule_applied, computed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (cluster_id) DO NOTHING
+                """,
+                [cluster_id, *promotion_row],
+            )
 
     def _update_arc(
         self,
@@ -459,7 +533,7 @@ class ArcLinker:
 
         ``arc_centroids.arc_id`` references ``arcs.id``; ``clusters.arc_id``
         also references it. We snapshot the children, DELETE arc_centroids
-        (clusters do NOT need to be deleted — only one child table per
+        (clusters do NOT need to be deleted · only one child table per
         update direction needs the workaround at a time; clusters keeping
         their arc_id during the UPDATE is fine because we are not
         modifying clusters.arc_id here).
@@ -476,7 +550,7 @@ class ArcLinker:
         # arc_centroids is the only child we need to DELETE + reinsert
         # because the UPDATE on arcs DOES fire FK checks regardless of
         # whether arc.id changes. Clusters pointing at the arc reference
-        # arc.id (which we're not changing) — leaving them alone is fine
+        # arc.id (which we're not changing) · leaving them alone is fine
         # AS LONG AS the FK enforcement is "id is still valid post-UPDATE".
         # Empirically (see step 11 + memory/MEMORY.md), the safest pattern
         # is DELETE all FK-referencing rows that block the UPDATE. The old
@@ -536,7 +610,11 @@ class ArcLinker:
     def _update_cluster_arc_id_to_value(
         self, cluster_id: str, arc_id: str | None
     ) -> None:
-        """Same FK workaround as :meth:`_update_cluster_arc_id` for arbitrary value."""
+        """Same FK workaround as :meth:`_update_cluster_arc_id` for arbitrary value.
+
+        Kept in lock-step with :meth:`_update_cluster_arc_id` · any new
+        child table referencing ``clusters.id`` must be added here too.
+        """
         member_articles = [
             r[0]
             for r in self._conn.execute(
@@ -548,12 +626,25 @@ class ArcLinker:
             "SELECT centroid, embedded_at FROM cluster_embeddings WHERE cluster_id = ?",
             [cluster_id],
         ).fetchone()
+        promotion_row = self._conn.execute(
+            """
+            SELECT raw_defcon, ceiling_defcon, final_defcon,
+                   bands_present, sides_present, confidence,
+                   rule_applied, computed_at
+              FROM promotion_log
+             WHERE cluster_id = ?
+            """,
+            [cluster_id],
+        ).fetchone()
 
         self._conn.execute(
             "DELETE FROM cluster_articles WHERE cluster_id = ?", [cluster_id]
         )
         self._conn.execute(
             "DELETE FROM cluster_embeddings WHERE cluster_id = ?", [cluster_id]
+        )
+        self._conn.execute(
+            "DELETE FROM promotion_log WHERE cluster_id = ?", [cluster_id]
         )
         self._conn.execute(
             "UPDATE clusters SET arc_id = ? WHERE id = ?", [arc_id, cluster_id]
@@ -569,6 +660,19 @@ class ArcLinker:
                 "INSERT INTO cluster_embeddings (cluster_id, centroid, embedded_at) "
                 "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
                 [cluster_id, embedding_row[0], embedding_row[1]],
+            )
+        if promotion_row is not None:
+            self._conn.execute(
+                """
+                INSERT INTO promotion_log (
+                    cluster_id, raw_defcon, ceiling_defcon, final_defcon,
+                    bands_present, sides_present, confidence,
+                    rule_applied, computed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (cluster_id) DO NOTHING
+                """,
+                [cluster_id, *promotion_row],
             )
 
     # ── Centroid recompute ──────────────────────────────────────────────

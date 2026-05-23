@@ -559,8 +559,116 @@ ranges, prose pauses, or table cells.
 No code module changes · no tests · no ADR amendments · 558 passed,
 2 skipped stays.
 
-## Next
+### Step 16 follow-up · arc-link cascade fix · 2026-05-24
 
-Step 16 smoke run · operator-driven via `scripts/run_first_smoke.ps1`.
-Step 17 scope determined by what surfaces in `memory/operator-tasks.md`
-during the run.
+The first real smoke run (2026-05-23) reached the arc-link stage and
+emitted 240 `arc_link_cluster_failed` warnings · all 240 clusters
+tried to seed `arc_20260523_0001`. One orphan row landed in `arcs`
++ `arc_centroids` (the first attempt's INSERT succeeded · every
+subsequent attempt hit duplicate-PK).
+
+Root cause was a missed FK in the workaround in
+`musahit/arcs/linker.py::_update_cluster_arc_id`. The workaround
+snapshotted `cluster_articles` and `cluster_embeddings` and re-
+inserted them around the cluster UPDATE · but `promotion_log`
+(added in step 11 with `cluster_id REFERENCES clusters(id)`) was
+never wired in. Every `UPDATE clusters SET arc_id = ?` raised; the
+outer try/except caught it; BUT the arc-id counter was incremented
+inside the success branch, so on failure it sat still. Next cluster
+retried `arc_20260523_0001`. Cascade.
+
+Fix scope (single commit on 2026-05-24):
+
+- `musahit/arcs/linker.py::_update_cluster_arc_id` · snapshot ·
+  DELETE · re-INSERT `promotion_log` alongside `cluster_articles`
+  and `cluster_embeddings`.
+- `musahit/arcs/linker.py::_update_cluster_arc_id_to_value` · same
+  promotion_log extension; both helpers stay in lock-step.
+- `musahit/arcs/linker.py::ArcLinker.run` · `seed_attempted` flag
+  + counter advance moved to `finally`. Counter advances whether
+  `_seed_arc` succeeds or raises · no more cascade even if a future
+  child FK is missed.
+- `musahit/arcs/linker.py::_seed_arc` · manual rollback. INSERT
+  arc + arc_centroids first (required by `clusters.arc_id` FK),
+  then attempt `_update_cluster_arc_id` inside try/except · on
+  failure DELETE the just-inserted rows before re-raising. DuckDB
+  auto-commits per statement so this is the manual equivalent of
+  a transaction rollback.
+- `tests/test_linker.py` · three regression tests:
+  `TestPromotionLogPreservedAcrossArcUpdate` (round-trip),
+  `TestSeedArcRollback` (orphan-free failure), and
+  `TestCounterAdvancesOnSeedFailure` (no cascade on injected
+  failures). Existing 10 tests stay green; new tests bring linker
+  coverage to 13.
+- `scripts/cleanup_orphan_arcs.py` · one-off operator script,
+  targets `arc_20260523_0001` only, refuses to delete if the row
+  has any linked clusters.
+- `memory/MEMORY.md` · DuckDB FK Update Pattern entry extended
+  with `promotion_log` in the "Applies to" list and a Maintenance
+  rule (whenever a new child FK lands on a parent already in this
+  list, every helper must be extended; counters in loops calling
+  the helper must advance in `finally`, not inside the success
+  branch).
+- `docs/implementations/2026-05-24-arc-link-bug-fix.md` · standard
+  Problem · Root cause · What changed · Why this shape · Verification ·
+  Operator caveats per CLAUDE.md.
+
+ADR-008 was NOT amended · the orphan-on-failure rollback is an
+implementation safety measure for DuckDB's per-statement auto-commit,
+not a semantic decision about the arc model. The /goal tripwire on
+this was checked: the rollback semantics are not in ADR-008 scope.
+
+Verified: `ruff check .` clean; `pytest tests/test_linker.py -q`
+shows 13 passed (up from 10); full suite stays green.
+
+Operator action before the next smoke run: `python scripts/cleanup_orphan_arcs.py`
+to remove the one orphan from 2026-05-23.
+
+### Step 16 follow-up · category normalization · 2026-05-24
+
+The first smoke run also surfaced a Turkish-character-folding bug
+in `WorkerResponse.category`. Qwen2.5 7B returns category strings
+with Latin I in place of Turkish İ (e.g. `DIPLOMASİ` instead of
+`DİPLOMASİ`) · pydantic's enum coercion rejects the value · the
+classifier retries `max_retries` times · the cluster falls through
+to the conservative `{UNCLASSIFIED, AMBIENT, low}` fallback. 2 of
+139 clusters hit this path on 2026-05-23; the bug is systemic
+across every Category value containing Turkish-specific characters
+(`POLİTİKA`, `EKONOMİ`, `DİPLOMASİ`, `GÜVENLİK`).
+
+Fix scope (one commit on 2026-05-24):
+
+- `musahit/score/schema.py` · added `_tr_lower`,
+  `_fold_for_matching`, `_CATEGORY_NORMALIZATION_MAP` (built
+  programmatically from `Category` enum values, with import-time
+  collision assertion), `_normalize_category` helper, and a
+  `field_validator(mode="before")` on `WorkerResponse.category`
+  that runs the fold lookup before enum coercion. Unknown values
+  pass through unchanged so the classifier's retry path still
+  fires for genuinely malformed input.
+- `tests/test_score/__init__.py` + `tests/test_score/test_schema.py`
+  · new test module with 27 tests: 8 canonical pass-throughs (all
+  Category values), 1 exact bug reproduction (`DIPLOMASİ` →
+  `DİPLOMASİ`), 4 ASCII folds, 5 lowercase folds, partial-match
+  rejection, unknown rejection, empty rejection, fold-map
+  invariant, helper round-trip, helper pass-through, and 3
+  `parse_worker_response` integration cases that exercise the
+  validator through the JSON-strip path.
+- `memory/MEMORY.md` · "Turkish locale case folding" entry
+  extended with the LLM-output normalization use case + a pointer
+  to the canonical pattern in `_normalize_category` for any
+  future Pydantic schema with Turkish-string-valued enum fields.
+- `docs/implementations/2026-05-24-category-normalization.md` ·
+  standard impl doc.
+
+Scope discipline: WorkerResponse is currently the only pydantic
+schema with a Turkish-enum field (verified via grep across
+`musahit/`); WriterResponse, if it ever lands, would need the
+same treatment. The /goal tripwire on "other model outputs need
+similar normalization" was checked and cleared with that grep.
+
+Pydantic 2.12.5 supports `field_validator(mode="before")` cleanly
+· fold map has 8 distinct keys for 8 Category values, no
+collisions (asserted at import + in tests). Verified ruff clean,
+`pytest tests/ -q` shows 588 passed, 2 skipped (561 prior + 27
+new).

@@ -3,7 +3,7 @@
 DB fixture mirrors the cluster/score-stage fixtures: in-memory DuckDB
 with schema + sources + pipeline_runs + sample clusters with
 embeddings and entities. No Ollama call (embeddings are read straight
-from the DB). The cluster embeddings here are pure-Python vectors —
+from the DB). The cluster embeddings here are pure-Python vectors ·
 similarity is computed via the same arithmetic the production code
 uses.
 """
@@ -528,7 +528,7 @@ class TestPeakDefconMinDirection:
     async def test_peak_uses_min_for_severity(
         self, db: duckdb.DuckDBPyConnection
     ) -> None:
-        # Arc starts at MATERIAL (3). New cluster is SEVERE (2 — more severe).
+        # Arc starts at MATERIAL (3). New cluster is SEVERE (2 · more severe).
         # peak_defcon should become 2 (min of 3 and 2) because lower int = more severe.
         arc_vec = _unit(7)
         _insert_arc(
@@ -558,7 +558,7 @@ class TestPeakDefconMinDirection:
     async def test_peak_does_not_regress_to_less_severe(
         self, db: duckdb.DuckDBPyConnection
     ) -> None:
-        # Arc already at SEVERE (2). A ROUTINE (4 — less severe) cluster
+        # Arc already at SEVERE (2). A ROUTINE (4 · less severe) cluster
         # joining must NOT regress the peak; peak stays at SEVERE.
         arc_vec = _unit(0)
         _insert_arc(
@@ -585,6 +585,183 @@ class TestPeakDefconMinDirection:
         ).fetchone()[0]
         # min(SEVERE=2, ROUTINE=4) = 2 → SEVERE preserved.
         assert peak == int(DEFCON.SEVERE)
+
+
+# ── TestPromotionLogPreservedAcrossArcUpdate ───────────────────────────────
+#
+# Regression for the 2026-05-23 smoke-run cascade. promotion_log.cluster_id
+# is a FK on clusters.id; the FK workaround in _update_cluster_arc_id had
+# to be extended to snapshot · DELETE · re-INSERT the promotion_log row
+# alongside cluster_articles and cluster_embeddings.
+
+
+class TestPromotionLogPreservedAcrossArcUpdate:
+    async def test_promotion_log_round_trips(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        arc_vec = _unit(15)
+        _insert_arc(
+            db,
+            arc_id="arc_promo_test",
+            state=ArcState.OPEN,
+            centroid=arc_vec,
+            entity_set=["İmamoğlu", "İstanbul"],
+            last_update_at=NOW - timedelta(days=1),
+        )
+        _insert_article(
+            db,
+            article_id="pa1",
+            source_id="bianet",
+            entities=["İmamoğlu", "İstanbul"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_with_promotion",
+            final_defcon=int(DEFCON.SEVERE),
+            centroid=arc_vec,
+            article_ids=["pa1"],
+        )
+        # Insert a promotion_log row as the score stage would.
+        db.execute(
+            """
+            INSERT INTO promotion_log (
+                cluster_id, raw_defcon, ceiling_defcon, final_defcon,
+                bands_present, sides_present, confidence, rule_applied,
+                computed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "cl_with_promotion",
+                int(DEFCON.MATERIAL),
+                int(DEFCON.SEVERE),
+                int(DEFCON.SEVERE),
+                json.dumps(["independent"]),
+                json.dumps(["gov"]),
+                "ORTA",
+                "single-band-ceiling",
+                NOW,
+            ],
+        )
+
+        result = await ArcLinker(db).run(RUN_ID)
+        assert result["joined"] == 1
+        assert result["errors"] == 0
+
+        row = db.execute(
+            """
+            SELECT raw_defcon, ceiling_defcon, final_defcon, bands_present,
+                   sides_present, confidence, rule_applied, computed_at
+              FROM promotion_log
+             WHERE cluster_id = 'cl_with_promotion'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[0] == int(DEFCON.MATERIAL)
+        assert row[1] == int(DEFCON.SEVERE)
+        assert row[2] == int(DEFCON.SEVERE)
+        assert json.loads(row[3]) == ["independent"]
+        assert json.loads(row[4]) == ["gov"]
+        assert row[5] == "ORTA"
+        assert row[6] == "single-band-ceiling"
+        assert row[7] == NOW
+
+
+# ── TestSeedArcRollback ────────────────────────────────────────────────────
+#
+# If _update_cluster_arc_id raises inside _seed_arc, the just-inserted
+# arc + arc_centroids rows must be deleted before re-raising so no orphan
+# rows survive. DuckDB auto-commits per statement so this rollback is
+# manual (no real transaction).
+
+
+class TestSeedArcRollback:
+    async def test_seed_arc_rollback_removes_orphan_arc_on_failure(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        _insert_article(
+            db,
+            article_id="rb_art",
+            source_id="bianet",
+            entities=["Erdoğan", "Kabine"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_rb",
+            final_defcon=int(DEFCON.SEVERE),
+            centroid=_unit(10),
+            article_ids=["rb_art"],
+        )
+
+        linker = ArcLinker(db)
+
+        def _boom(cluster_id: str, arc_id: str) -> None:
+            raise RuntimeError("simulated FK cascade")
+
+        linker._update_cluster_arc_id = _boom  # type: ignore[method-assign]
+
+        result = await linker.run(RUN_ID)
+        assert result["errors"] == 1
+        assert result["seeded"] == 0
+        assert db.execute("SELECT COUNT(*) FROM arcs").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM arc_centroids").fetchone()[0] == 0
+
+
+# ── TestCounterAdvancesOnSeedFailure ───────────────────────────────────────
+#
+# The 2026-05-23 cascade: 240 clusters all tried to seed the SAME arc_id
+# because the counter sat inside the success branch. Counter must advance
+# whether _seed_arc succeeds or raises so subsequent clusters do not
+# collide.
+
+
+class TestCounterAdvancesOnSeedFailure:
+    async def test_counter_advances_when_seed_fails(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Three clusters with disjoint embeddings + entities so none
+        # match each other or any existing arc.
+        for i, (cid, art) in enumerate(
+            [("cl_a", "art_a"), ("cl_b", "art_b"), ("cl_c", "art_c")]
+        ):
+            _insert_article(
+                db,
+                article_id=art,
+                source_id="bianet",
+                entities=[f"Ent{i}A", f"Ent{i}B"],
+            )
+            _insert_cluster(
+                db,
+                cluster_id=cid,
+                final_defcon=int(DEFCON.SEVERE),
+                centroid=_unit(20 + i),
+                article_ids=[art],
+            )
+
+        linker = ArcLinker(db)
+        original = linker._update_cluster_arc_id
+        calls = {"n": 0}
+
+        def _fail_first_two(cluster_id: str, arc_id: str) -> None:
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("simulated FK cascade")
+            return original(cluster_id, arc_id)
+
+        linker._update_cluster_arc_id = _fail_first_two  # type: ignore[method-assign]
+
+        result = await linker.run(RUN_ID)
+        # Two failures, one success · the surviving arc must use the
+        # advanced counter (the third arc_id), NOT the first one that
+        # the cascading bug would have reused.
+        assert result["errors"] == 2
+        assert result["seeded"] == 1
+
+        arc_rows = db.execute("SELECT id FROM arcs").fetchall()
+        assert len(arc_rows) == 1
+        # The first cluster the loop sees gets _0001, second _0002, third
+        # _0003. With the first two raising and being rolled back, only
+        # the _0003 row should survive.
+        assert arc_rows[0][0].endswith("_0003"), arc_rows[0][0]
 
 
 def _vector_helper_smoke() -> None:

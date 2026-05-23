@@ -61,8 +61,34 @@ def tr_lower(s: str) -> str:
 ```
 
 Apply to **both** the matched text and any vocabulary/pattern before
-comparing. Used today in `musahit/normalize/entities.py`; reuse the
-helper there for any new locale-aware matching.
+comparing. Used today in `musahit/normalize/entities.py` and
+`musahit/score/schema.py`; reuse the helper there for any new
+locale-aware matching.
+
+**LLM output normalization use case** (added 2026-05-24): LLMs
+trained primarily on English data tend to drop Turkish diacritics
+in their JSON outputs · `DIPLOMASİ` becomes `DIPLOMASI`,
+`POLİTİKA` becomes `POLITIKA`, etc. When a Pydantic model has a
+Turkish-string-valued enum field, attach a `field_validator` with
+`mode="before"` that folds the input through Turkish-locale lower
++ ASCII diacritic map and looks the result up in a pre-built
+canonical map. `musahit/score/schema.py::_normalize_category` is
+the canonical pattern (built programmatically from the
+`Category` enum so a future enum addition picks the normalization
+up automatically · with an import-time collision assertion).
+
+The validator must NOT swallow truly malformed values · unknown
+inputs return unchanged so pydantic's enum coercion raises and
+the upstream retry path fires. The 2026-05-24 fix was triggered
+by the first real smoke run, in which 2 of 139 clusters fell
+through to the classifier's `UNCLASSIFIED` / `AMBIENT` / `low`
+fallback because Qwen2.5 returned `DIPLOMASİ`. See
+`docs/implementations/2026-05-24-category-normalization.md`.
+
+Apply this pattern to every future Pydantic schema with a
+Turkish-string-valued enum field · the `Confidence` enum
+(`YÜKSEK`, `ORTA`, `DÜŞÜK`) is the most likely next candidate if
+it ever lands inside an LLM-output model.
 
 ### ADR semantic intent overrides formula text
 
@@ -112,13 +138,43 @@ transaction semantics because DuckDB handles per-statement atomicity.
 
 Applies to:
 
-* `clusters` update when `cluster_articles` or `cluster_embeddings`
-  rows reference it (step 11 · step 12)
+* `clusters` update when `cluster_articles`, `cluster_embeddings`,
+  or `promotion_log` rows reference it (steps 11 · 12 · 13)
 * `arcs` update when `arc_centroids` references it (step 12)
 * any future parent table update with active child references
 
 Discovered in step 11 · documented in
 `docs/implementations/2026-05-23-score.md`.
+
+**Maintenance rule** (added 2026-05-24): whenever a new table is
+added whose FK targets a parent already covered by this workaround,
+EVERY helper that does the parent UPDATE must be extended to
+snapshot · DELETE · re-INSERT the new table's rows. Forgetting this
+turns the parent UPDATE into a hard raise · and, depending on the
+loop structure, into a cascade.
+
+The 2026-05-23 arc-link cascade is the canonical example:
+`promotion_log.cluster_id REFERENCES clusters(id)` (added in step 11)
+was never wired into the FK workaround in
+`musahit/arcs/linker.py::_update_cluster_arc_id`. Every
+`cluster.arc_id` UPDATE raised; the outer loop caught the error;
+BUT the arc-id counter sat inside the success branch so it never
+advanced; 240 clusters all retried `arc_20260523_0001` and only the
+first INSERT succeeded · the rest hit duplicate-PK and buried the
+real diagnostic. Documented in
+`docs/implementations/2026-05-24-arc-link-bug-fix.md`.
+
+Maintenance checklist when adding a new child table to a parent
+already in this list:
+
+1. Add the FK clause to the new table's schema migration.
+2. Grep for every helper that does `UPDATE <parent>` and extend
+   each of them to handle the new child.
+3. Add a regression test that inserts rows into the new child,
+   triggers the parent UPDATE, and asserts the rows survive.
+4. Audit loops that call the helper: counter / position state must
+   advance in `finally`, not inside the success branch, so a
+   future FK miss does not cascade.
 
 
 ### ADR-016 trigger: vocabulary-vs-transformer NER
