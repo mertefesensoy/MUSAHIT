@@ -5,12 +5,12 @@ The prompt is one big string with five parts:
 1. System role (Turkish · neutral · resmi register · no opinions).
 2. DEFCON schema reminder.
 3. The template structure (with section markers preserved verbatim).
-4. The day's data — clusters bucketed, open arcs, resolved arcs, log.
+4. The day's data · clusters bucketed, open arcs, resolved arcs, log.
 5. Output instruction (fill template; do not alter section markers).
 
 Discipline rules are inlined per ADR-009 § Discipline rules. The
-prompt does NOT include sources' full article bodies — only headlines,
-summaries, and source/band tags — to keep total input under
+prompt does NOT include sources' full article bodies · only headlines,
+summaries, and source/band tags · to keep total input under
 Trendyol-LLM's 32K context window even on heavy days.
 
 Estimated input size (worst case):
@@ -32,6 +32,7 @@ from collections.abc import Iterable
 from musahit.common.types import Category
 from musahit.score.defcon import DEFCON, DEFCON_ANCHORS, DEFCON_LABEL_TR
 from musahit.writer.payload import (
+    BUCKET_AMBIENT,
     BUCKET_MATERIAL,
     BUCKET_PRIORITY,
     BUCKET_ROUTINE,
@@ -75,7 +76,7 @@ def _defcon_schema_block() -> str:
         label = DEFCON_LABEL_TR[level]
         anchors = DEFCON_ANCHORS.get(level, ())
         anchor_preview = "; ".join(anchors[:2]) if anchors else ""
-        lines.append(f"  {int(level)} · {label} — örnek: {anchor_preview}")
+        lines.append(f"  {int(level)} · {label} · örnek: {anchor_preview}")
     return "\n".join(lines)
 
 
@@ -83,9 +84,18 @@ def _defcon_schema_block() -> str:
 
 
 def _template_skeleton() -> str:
+    """Render the empty template skeleton fed to the writer LLM.
+
+    Each section's prompt_instruction (from TemplateSection) is rendered
+    under its marker. The 2026-05-23 smoke run showed a single literal
+    placeholder caused Trendyol-LLM to echo the placeholder text verbatim
+    in sections it found ambiguous; per-section instructions including
+    the empty-state phrase eliminate the ambiguity. See
+    ``docs/implementations/2026-05-24-template-placeholder-fix.md``.
+    """
     parts: list[str] = [DOCUMENT_TITLE, ""]
     for section in TEMPLATE_SECTIONS:
-        parts.extend(["", section.marker, "", "[içerik buraya · şablon talimatlarına bak]"])
+        parts.extend(["", section.marker, "", section.prompt_instruction])
     return "\n".join(parts)
 
 
@@ -125,6 +135,7 @@ def _clusters_data_block(payload: BriefingPayload) -> str:
     priority = _cluster_bucket(payload, BUCKET_PRIORITY)
     material = _cluster_bucket(payload, BUCKET_MATERIAL)
     routine = _cluster_bucket(payload, BUCKET_ROUTINE)
+    ambient = _cluster_bucket(payload, BUCKET_AMBIENT)
     social_only = [
         c for c in priority + material + routine if c.is_social_only
     ]
@@ -161,6 +172,18 @@ def _clusters_data_block(payload: BriefingPayload) -> str:
     if social_only:
         for c in social_only:
             sections.append(f"- {c.headline}")
+    else:
+        sections.append("(bugün öğe yok)")
+
+    # AMBİYANS bucket · added 2026-05-24 after the smoke-run echo bug ·
+    # the section header was empty in the data block so the LLM had
+    # nothing to fold into AMBİYANS · DEFCON 5 and echoed the placeholder
+    # instead. See docs/implementations/2026-05-24-template-placeholder-fix.md.
+    sections.append("\nAMBİYANS (DEFCON 5):")
+    if ambient:
+        for c in ambient:
+            srcs = "(" + str(len(c.sources)) + " kaynak)"
+            sections.append(f"- {c.headline} · {srcs}")
     else:
         sections.append("(bugün öğe yok)")
 

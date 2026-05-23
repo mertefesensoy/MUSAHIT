@@ -78,3 +78,39 @@ class TestInvalidBriefing:
         # (it doesn't match the required marker line exactly); and the
         # required SİSTEM LOG section is then missing.
         assert errors
+
+
+class TestPlaceholderEchoRejected:
+    """Regression for the 2026-05-23 smoke run · Trendyol echoed the
+    skeleton's literal ``[içerik buraya · …]`` placeholder verbatim into
+    AÇIK GELİŞMELER and AMBİYANS · DEFCON 5. The validator now catches
+    this so the bad output is rejected and the writer retries."""
+
+    def test_briefing_with_echoed_placeholder_fails(self) -> None:
+        body = _valid_skeleton().replace(
+            "## ❯ AMBİYANS · DEFCON 5\n\niçerik\n\n",
+            "## ❯ AMBİYANS · DEFCON 5\n\n[içerik buraya · şablon talimatlarına bak]\n\n",
+            1,
+        )
+        errors = validate_briefing_markdown(body)
+        assert any("unfilled template placeholder" in e for e in errors), errors
+
+    def test_briefing_with_partial_placeholder_fragment_fails(self) -> None:
+        """Matching only the opening substring keeps the check robust
+        against any future tweak to the placeholder trailer."""
+        body = _valid_skeleton().replace(
+            "## ❯ DEFCON 4 · GÜNDEM\n\niçerik\n\n",
+            "## ❯ DEFCON 4 · GÜNDEM\n\n[içerik buraya tamamlanmadı]\n\n",
+            1,
+        )
+        errors = validate_briefing_markdown(body)
+        assert any("unfilled template placeholder" in e for e in errors), errors
+
+    def test_clean_briefing_does_not_trigger_placeholder_rejection(
+        self,
+    ) -> None:
+        """A briefing without the placeholder fragment passes (the
+        existing _valid_skeleton uses bare 'içerik' which must not
+        match the substring guard)."""
+        errors = validate_briefing_markdown(_valid_skeleton())
+        assert not any("unfilled template placeholder" in e for e in errors)

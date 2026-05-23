@@ -1,7 +1,7 @@
 """Briefing markdown validator.
 
 Pins the eight required top-level sections from ADR-009 in their
-documented order. Returns a list of error strings — empty means valid.
+documented order. Returns a list of error strings · empty means valid.
 
 The validator is intentionally tight on **structural** discipline
 (section presence, marker prefix, order) and loose on **content**
@@ -16,6 +16,15 @@ from __future__ import annotations
 from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
 
 EXTRA_SECTION_ALLOWED_PREFIX: str = "## ❯ "
+
+# Substring of the old single-placeholder instruction
+# (``[içerik buraya · şablon talimatlarına bak]``). Any briefing that
+# still contains this fragment means the writer echoed the prompt's
+# template instructions back verbatim · the 2026-05-23 smoke-run bug.
+# The fragment is unusual enough that no legitimate content produces it;
+# matching only the opening "[içerik buraya" keeps the check robust
+# against any future tweak to the instruction trailer.
+_PLACEHOLDER_ECHO_SUBSTRING: str = "[içerik buraya"
 
 
 def validate_briefing_markdown(text: str) -> list[str]:
@@ -75,6 +84,15 @@ def validate_briefing_markdown(text: str) -> list[str]:
                 f"top-level section missing '❯' prefix: '{line}' "
                 f"(must start with '{EXTRA_SECTION_ALLOWED_PREFIX}')"
             )
+
+    # 5) Reject any briefing that contains the prompt's template-
+    # instruction placeholder verbatim · the writer echoed the
+    # instruction text instead of producing content.
+    if _PLACEHOLDER_ECHO_SUBSTRING in text:
+        errors.append(
+            "briefing contains unfilled template placeholder · model "
+            "echoed the instruction text"
+        )
 
     return errors
 

@@ -672,3 +672,72 @@ Pydantic 2.12.5 supports `field_validator(mode="before")` cleanly
 collisions (asserted at import + in tests). Verified ruff clean,
 `pytest tests/ -q` shows 588 passed, 2 skipped (561 prior + 27
 new).
+
+### Step 16 follow-up · template placeholder echo fix · 2026-05-24
+
+The 2026-05-23 smoke run revealed a third writer-stage bug: Trendyol
+echoed the literal string `"[içerik buraya · şablon talimatlarına
+bak]"` verbatim into AÇIK GELİŞMELER and AMBİYANS · DEFCON 5 instead
+of rendering real content or the "(bugün öğe yok)" empty-state.
+Three root causes, three fixes:
+
+(a) `musahit/writer/prompt.py::_template_skeleton` used the same
+literal placeholder string under every section · sections the model
+understood got filled, ambiguous sections got the literal echoed.
+Fix: extended `TemplateSection` dataclass with a
+`prompt_instruction: str` field; populated all 8 sections with
+Turkish guidance including the empty-state phrase
+(`"(bugün öğe yok)"` or `"(bugün güncelleme yok)"` or
+`"(bugün kapatılan yok)"`). Skeleton now renders each section's
+prompt_instruction under the marker.
+
+(b) `_clusters_data_block` had no AMBİYANS / DEFCON 5 bucket · the
+section header always lacked data so the model had nothing to fold
+in. Fix: added an AMBİYANS bucket using the already-existing
+`BUCKET_AMBIENT = (5,)` from `payload.py`. Rendered as bullet list
+of headlines with kaynak count, or the standard empty-state phrase
+when no DEFCON 5 clusters are present.
+
+(c) `musahit/writer/validator.py` didn't reject briefings containing
+the literal placeholder · the bad output passed validation and got
+written to disk. Fix: added a content check for the substring
+`"[içerik buraya"` (the opening of the old placeholder · stable
+against any future trailer tweak). On match: error
+"briefing contains unfilled template placeholder · model echoed the
+instruction text". The writer's existing retry loop will then
+re-prompt with structured feedback.
+
+Tests · 12 new across the three test files in `tests/test_writer/`:
+
+- `test_template.py::TestPromptInstruction` (4) · every section has a
+  non-empty, substantive prompt_instruction; no instruction contains
+  the old placeholder; data-carrying sections include an empty-state
+  phrase; section names remain unique.
+- `test_prompt.py::TestTemplateSkeletonInstructions` (2) · skeleton
+  contains each section's instruction; skeleton does NOT contain the
+  old literal placeholder.
+- `test_prompt.py::TestAmbientClusterRendering` (3) · AMBİYANS bucket
+  renders bullet headlines; renders empty-state when no ambient
+  clusters; full prompt with ambient payload stays under size budget.
+- `test_validator.py::TestPlaceholderEchoRejected` (3) · briefings
+  with the placeholder are rejected with the new error message;
+  partial placeholder fragments are caught too; clean briefings
+  (whose body text incidentally contains the word "içerik") still
+  pass.
+
+Tripwires checked:
+- `BUCKET_AMBIENT` already exists in payload.py with the right value
+  `(5,)`. No conflict. Just needed to use it.
+- ADR-009 needs no amendment: `prompt_instruction` is implementation
+  guidance to the LLM, not a semantic change to the template
+  contract (sections, markers, ordering).
+- The substring `"[içerik buraya"` appears only in the bug site
+  (`musahit/writer/prompt.py`) and operator notes (`memory/operator-tasks.md`)
+  · no test fixture uses it. Existing `_valid_skeleton()` in
+  test_validator.py uses bare `"içerik"` which doesn't match.
+- AMBİYANS bullet shape (headline + source count) matches ADR-009's
+  "düşük öncelikli gündem" framing · no scope expansion needed.
+
+Verified: `ruff check .` clean; `pytest tests/test_writer/ -q` shows
+59 passed (47 prior + 12 new); full suite expected at 600 passed,
+2 skipped (588 prior + 12 new).

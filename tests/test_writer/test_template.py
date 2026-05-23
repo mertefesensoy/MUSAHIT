@@ -1,4 +1,4 @@
-"""Tests for musahit.writer.template — the canonical section list."""
+"""Tests for musahit.writer.template · the canonical section list."""
 
 from __future__ import annotations
 
@@ -46,3 +46,46 @@ class TestCategorySubsections:
             "### MEVZUAT",
             "### TOPLUM",
         )
+
+
+class TestPromptInstruction:
+    """Regression for the 2026-05-23 placeholder-echo bug. Every section
+    MUST carry a Turkish prompt_instruction so the writer LLM has an
+    unambiguous fallback (including the empty-state phrase) and never
+    echoes a generic placeholder back into the briefing."""
+
+    def test_every_section_has_non_empty_prompt_instruction(self) -> None:
+        for s in TEMPLATE_SECTIONS:
+            assert s.prompt_instruction, (
+                f"section {s.name} has empty prompt_instruction · the "
+                f"writer will have nothing to render under {s.marker!r}"
+            )
+            assert s.prompt_instruction.strip() == s.prompt_instruction
+            assert len(s.prompt_instruction) >= 20  # substantive guidance
+
+    def test_no_section_carries_the_old_literal_placeholder(self) -> None:
+        """The old placeholder text MUST NOT leak back into any instruction."""
+        bad = "[içerik buraya"
+        for s in TEMPLATE_SECTIONS:
+            assert bad not in s.prompt_instruction, (
+                f"section {s.name} still has the old placeholder fragment"
+            )
+
+    def test_data_carrying_sections_include_an_empty_state_phrase(self) -> None:
+        """Sections whose content can be empty must instruct the model on
+        the empty-state phrase. SİSTEM LOG is exempt because the payload
+        always contains the run metadata."""
+        empty_state_required = {
+            "defcon_1_2", "defcon_3", "open_arcs", "defcon_4",
+            "social_only", "ambient", "resolved_arcs",
+        }
+        for s in TEMPLATE_SECTIONS:
+            if s.name not in empty_state_required:
+                continue
+            assert "(bugün" in s.prompt_instruction, (
+                f"section {s.name} missing empty-state phrase '(bugün …)'"
+            )
+
+    def test_names_remain_unique_after_extension(self) -> None:
+        names = [s.name for s in TEMPLATE_SECTIONS]
+        assert len(names) == len(set(names))
