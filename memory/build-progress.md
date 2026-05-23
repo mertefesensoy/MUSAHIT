@@ -26,6 +26,19 @@ reuters_tr, kap). `seed_sources(conn)` upserts to sources table; called from ini
 _build_sources_index() raises ValueError at import on any duplicate/invalid/empty entry.
 39 tests, all pass. Full suite: 122 passed, 1 skipped.
 
+### Step 4 · `musahit/ingest/rss.py` + `Ingester` Protocol · 2026-05-23
+
+`Ingester` `typing.Protocol` and `IngestResult` dataclass added to `musahit/ingest/__init__.py`.
+`RssIngester` class implements the Protocol using httpx (async, timeouts, UA=`MUSAHIT/0.1`)
+to fetch and feedparser to parse bytes. Article id = `sha256(source_id|url)` — excludes
+`fetched_at` (ADR-006 comment is descriptive; including it would defeat inter-fetch dedup).
+Two dedup layers: in-memory `set` on feed_entry_id (intra-fetch), `ON CONFLICT (id) DO NOTHING`
+on raw_articles.id (inter-fetch). Canonical timestamp = `min(published, updated)` stored in
+`headers` JSON. Error mapping: TimeoutException→TIMEOUT, other HTTPError or status≥400→
+HTTP_ERROR, bozo+empty→PARSE_ERROR, bozo+entries→OK (partial). 14 tests, all pass via
+`httpx.MockTransport` (zero network). Full suite: 136 passed, 1 skipped. Incidental ruff
+fix in `musahit/common/migrations.py` (SIM105 try/except/pass → contextlib.suppress).
+
 ## Next
 
-Step 4 · `musahit/ingest/rss.py` — RSS/Atom feed ingestion via feedparser.
+Step 5 · `musahit/ingest/html.py` — HTML scrape ingester (selectolax) per ADR-003.

@@ -10,6 +10,7 @@ The public entry point for everything is `init_db()`.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 from typing import Any
@@ -171,10 +172,8 @@ def create_hnsw_indices(conn: duckdb.DuckDBPyConnection, log: Any) -> int:
     """
     # Older DuckDB VSS versions require this flag for file-based HNSW indices.
     # Silently ignore if the setting does not exist in newer DuckDB releases.
-    try:
+    with contextlib.suppress(duckdb.Error):
         conn.execute("SET hnsw_enable_experimental_persistence = true")
-    except duckdb.Error:
-        pass
 
     created = 0
     for index_name, table_name, column_name in HNSW_INDICES:
