@@ -394,10 +394,25 @@ speakers familiar with the term actually use. `_defcon_num_repl` in
 replacement string; written briefing keeps "DEFCON" unchanged — only the
 text that flows into `PiperVoice.synthesize_wav` gets the respelling.
 Preprocessor tests expanded: per-level assertions for all five DEFCON levels
-(replacing the prior two-level spot check), plus guards against silent
-regression to the all-caps form and against false-positive respelling of bare
-DEFCON prose (e.g., "DEFCON ölçeği"). Preprocessor test count 21 → 24 (+3
-methods); full suite 520 passed, 2 skipped.
+(replacing the prior two-level spot check), plus a guard against silent
+regression to the all-caps form. Preprocessor test count 21 → 24 (+3
+methods); full suite reached 520 passed at this point.
+
+Follow-up the same day: audio QA surfaced two patterns the narrow regex
+missed — `Zirve DEFCON · 3` (numeral after a middle-dot or colon/hyphen
+separator with optional spaces) and standalone `Zirve DEFCON` (no trailing
+numeral). The regex was loosened from `\bDEFCON\s+([1-5])\b` to
+`\bDEFCON\b(?:\s*[·:-]?\s*([1-5]))?`; `_defcon_num_repl` handles the
+None-group case by emitting bare `Defkon`. Standalone `DEFCON` is now also
+respelled (semantic change from the initial work — Piper mispronounces bare
+`DEFCON` the same way as the digit-bearing form, so the fix applies to both).
+New tests: `test_middle_dot_separator`, `test_colon_separator`,
+`test_hyphen_separator`, `test_separator_without_spaces`,
+`test_standalone_defcon_becomes_defkon`, `test_standalone_defcon_in_prose`.
+The synthesiser test `test_piper_called_per_chunk` was updated to assert on
+the post-respelling header chunk (`Zirve Defkon İki`) rather than the
+pre-respelling form. Preprocessor tests 24 → 30 (+6); full suite 525 passed,
+2 skipped.
 
 ## Next
 

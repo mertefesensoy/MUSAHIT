@@ -86,7 +86,20 @@ _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _KAYNAKLAR_RE = re.compile(r"^\*?\*?Kaynaklar\*?\*?\s*·.*$", flags=re.MULTILINE)
-_DEFCON_NUM_RE = re.compile(r"\bDEFCON\s+([1-5])\b")
+# DEFCON appears in the briefing in three shapes that all need
+# Piper-friendly respelling:
+#   ``DEFCON 2``         — numeral right after a single space
+#   ``DEFCON · 3``       — section / metadata line with a middle-dot
+#                          (or ``:`` or ``-``) separator between the
+#                          term and the numeral
+#   ``Zirve DEFCON``     — standalone label without a trailing numeral
+#
+# The optional non-capture group ``(?:\s*[·:-]?\s*([1-5]))?`` captures
+# the digit when present; when it fails to match (no digit available),
+# the whole match is just ``\bDEFCON\b`` and the replacement function
+# emits the bare ``Defkon`` form. Case-sensitive: ``Defkon`` in the
+# output cannot re-match.
+_DEFCON_NUM_RE = re.compile(r"\bDEFCON\b(?:\s*[·:-]?\s*([1-5]))?")
 # Markdown horizontal rule / arrow marker remnants left over from
 # extracted briefing markdown. ``❯`` is the section pip.
 _HRULE_RE = re.compile(r"^---\s*$", flags=re.MULTILINE)
@@ -142,8 +155,16 @@ def _defcon_num_repl(match: re.Match[str]) -> str:
     # right phoneme path without translating the term. The written
     # briefing (briefing.md, dashboard HTML) keeps "DEFCON" — this
     # respelling only flows into ``PiperVoice.synthesize_wav``.
-    n = int(match.group(1))
-    return f"Defkon {DEFCON_TR_NUMBERS[n]}"
+    #
+    # When the regex captured a trailing 1-5 digit (the common case in
+    # the briefing's section markers), we emit ``Defkon {numeral}``
+    # with the Turkish word for the digit. When the regex matched a
+    # bare ``DEFCON`` (header labels like "Zirve DEFCON"), group 1 is
+    # None and we emit ``Defkon`` alone.
+    digit = match.group(1)
+    if digit is None:
+        return "Defkon"
+    return f"Defkon {DEFCON_TR_NUMBERS[int(digit)]}"
 
 
 __all__ = [

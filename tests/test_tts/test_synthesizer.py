@@ -194,7 +194,12 @@ class TestHappyPath:
         # Header + DEFCON 1-2 + DEFCON 3 + open arcs + closing → at least 4 chunks.
         # The closing line is the literal CLOSING_LINE constant.
         assert piper.call_count >= 4
-        assert any("Zirve DEFCON" in c for c in piper.calls)
+        # The header line "**Zirve DEFCON** · 2" gets respelled to
+        # "Zirve Defkon İki" by the preprocessor (DEFCON → Defkon
+        # plus numeral expansion; the regex now matches the ``·``
+        # separator path). Asserting on the post-respelling form
+        # makes the test pin both the chunking AND the respelling.
+        assert any("Zirve Defkon İki" in c for c in piper.calls)
         assert any("Önemli olay" in c for c in piper.calls)
         assert any("dashboard" in c for c in piper.calls)
 

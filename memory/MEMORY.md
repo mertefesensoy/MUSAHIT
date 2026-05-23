@@ -137,3 +137,14 @@ ADR-016 would propose either expanding the vocabulary or adding a
 transformer-NER fallback for opt-in long-tail coverage. Until the
 trigger fires the vocabulary stays — it costs nothing per night and
 covers the briefing's highest-signal names.
+
+### Audio QA is a real review stage
+
+Unit tests prove the TTS pipeline doesn't crash and that text 
+transformations fire as specified. They cannot prove that the resulting
+audio is acceptable to listen to. After any change touching extractor,
+preprocessor, or piper modules, regenerate the diagnostic MP3 and 
+listen end-to-end before moving to the next step. The DEFCON 
+respelling and regex tightening on 2026-05-23 are the canonical 
+example: 525 tests stayed green across three commits while three 
+distinct pronunciation issues were caught and fixed by ear alone.

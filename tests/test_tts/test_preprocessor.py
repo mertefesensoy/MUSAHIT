@@ -87,14 +87,47 @@ class TestDefconNumbering:
             # No remnant of the all-caps form.
             assert f"DEFCON {n}" not in out
 
-    def test_defcon_with_no_numeral_left_alone(self) -> None:
-        # No digit follows → the regex doesn't match → DEFCON stays
-        # untouched. The respelling only fires for the ``DEFCON N``
-        # pattern, not for bare mentions in prose.
+    def test_middle_dot_separator(self) -> None:
+        # Header lines and metadata lines often write the DEFCON
+        # numeral after the term with a ``·`` separator
+        # ("Zirve DEFCON · 3", "**Zirve DEFCON** · 2" after bold
+        # strip). The regex tolerates spaces around the separator.
+        out = preprocess_for_tts("Zirve DEFCON · 3")
+        assert "Defkon Üç" in out
+        assert "DEFCON" not in out
+
+    def test_colon_separator(self) -> None:
+        out = preprocess_for_tts("DEFCON: 4")
+        assert "Defkon Dört" in out
+
+    def test_hyphen_separator(self) -> None:
+        out = preprocess_for_tts("DEFCON-2 acil")
+        assert "Defkon İki" in out
+
+    def test_separator_without_spaces(self) -> None:
+        # ``DEFCON·5`` (no whitespace around the separator) — guards
+        # against the regex requiring at least one space.
+        out = preprocess_for_tts("DEFCON·5")
+        assert "Defkon Beş" in out
+
+    def test_standalone_defcon_becomes_defkon(self) -> None:
+        # Bare DEFCON without a trailing numeral is also respelled —
+        # header labels like "Zirve DEFCON" still flow through Piper
+        # and need the same phoneme nudge. Note: this is a behaviour
+        # change from the initial respelling work (which left bare
+        # DEFCON untouched); the regex tightening on 2026-05-23 added
+        # the standalone case to the matched set.
+        out = preprocess_for_tts("Zirve DEFCON")
+        assert "Defkon" in out
+        assert "DEFCON" not in out
+
+    def test_standalone_defcon_in_prose(self) -> None:
+        # ``DEFCON ölçeği`` (DEFCON followed by a non-digit word) →
+        # the optional digit-capture group fails to match, falls back
+        # to standalone DEFCON → respelled as "Defkon".
         out = preprocess_for_tts("DEFCON ölçeği aşağıdadır.")
-        assert "DEFCON ölçeği" in out
-        # Crucially, no false-positive Defkon respelling here.
-        assert "Defkon" not in out
+        assert "Defkon ölçeği" in out
+        assert "DEFCON" not in out
 
 
 # ── Markdown stripping ─────────────────────────────────────────────────────
