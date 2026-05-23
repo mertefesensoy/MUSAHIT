@@ -1,0 +1,57 @@
+# MÜŞAHİT · non-secret configuration
+# Secrets go in .env · this file is safe to commit.
+
+# Paths
+db_path = "data/musahit.duckdb"
+briefings_dir = "briefings"
+logs_dir = "logs"
+data_dir = "data"
+
+# Piper TTS voice model
+piper_voice_path = "voices/tr_TR-dfki-medium.onnx"
+
+# Ollama
+ollama_base_url = "http://localhost:11434"
+worker_model = "qwen2.5:7b-instruct-q4_K_M"
+writer_model = "trendyol-llm-7b-q4"
+embed_model = "bge-m3:latest"
+
+# Worker model parameters (ADR-002)
+worker_temperature = 0.1
+worker_max_tokens = 512
+worker_max_retries = 2
+
+# Writer model parameters (ADR-002)
+writer_temperature = 0.3
+writer_max_tokens = 4096
+
+# Arc linking thresholds (ADR-008)
+arc_cosine_threshold = 0.55
+arc_jaccard_threshold = 0.4
+arc_window_days = 30
+arc_open_to_watch_days = 7
+arc_watch_to_resolved_days = 30
+
+# Bootstrap period in days (BOOTSTRAP.md)
+bootstrap_days = 7
+
+# Minimum free disk space before pipeline aborts (ADR-012)
+min_free_disk_gb = 5
+
+# HTTP fetch defaults (ADR-003)
+default_rate_limit_seconds = 5
+default_timeout_seconds = 60
+
+# Reddit filter thresholds (ADR-003)
+reddit_min_score = 50
+reddit_min_comments = 25
+
+# Dashboard (ADR-011)
+dashboard_host = "127.0.0.1"
+dashboard_port = 8001
+
+# Retention policies in days (ADR-012)
+raw_articles_retention_days = 90
+articles_retention_days = 365
+backup_retention_days = 30
+log_retention_days = 90

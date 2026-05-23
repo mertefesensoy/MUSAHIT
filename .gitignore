@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# DuckDB runtime files — never commit live data
+data/*.duckdb
+data/backups/
+tmp/
+
+# Secrets
+.env
+
+# Briefings and logs (runtime output)
+briefings/
+logs/
+
+# Windows
+Thumbs.db
+desktop.ini
