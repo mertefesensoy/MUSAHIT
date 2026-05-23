@@ -355,6 +355,50 @@ passed, +1 skipped for the ffmpeg-gated case). Ruff clean.
 **Phase 3 (delivery) begins · TTS is the first delivery-side stage. Pipeline runner
 (step 17), liveness probe (step 18), and dashboard (step 19+) follow.**
 
+### Between step 14 and step 15 · TTS diagnostic improvements · 2026-05-23
+
+Two diagnostic gaps surfaced during the post-step-14 smoke test (the smoke run
+produced a silent placeholder MP3 because ffmpeg wasn't on PATH for the
+PowerShell session, and the actual cause was invisible) — both fixed in place:
+
+1. `musahit/tts/encoder.py` gains `check_ffmpeg_available()` — calls
+   `shutil.which("ffmpeg")`, raises `RuntimeError("ffmpeg not found on PATH ·
+   install via winget install ffmpeg on Windows or apt install ffmpeg on
+   Linux")` if missing. Called at module load time wrapped in try/except that
+   emits a `UserWarning` (so unit tests that don't actually encode MP3 keep
+   importing cleanly). `wav_to_mp3` itself calls `check_ffmpeg_available()` at
+   the start of its body — the strict raise that surfaces the env gap before
+   pydub's opaque `FileNotFoundError [WinError 2]` subprocess failure.
+2. `musahit/tts/synthesizer.py`'s exception handler now calls
+   `traceback.print_exc(file=sys.stderr)` before the structured `log.warning`
+   call. This guarantees manual / smoke-test invocations show the underlying
+   error even when `configure_logging()` hasn't been called. Production runs
+   (where the JSON log pipeline is wired) get both signals.
+
+4 new tests: `test_encoder.py::TestCheckFfmpegAvailable` (3 tests: raises when
+missing, passes when present, `wav_to_mp3` short-circuits before pydub) and
+`test_synthesizer.py::TestPiperFailure::test_piper_crash_prints_traceback_to_stderr`
+(1 test using `capsys` to verify stderr contains `Traceback`, exception type,
+and message; while preserving placeholder + audio_path + flag behaviour). Full
+suite: 517 passed, 2 skipped (was 513/2; +4 pass).
+
+`scripts/smoke_tts.py` and `scripts/diagnose_tts.py` are operator-side
+utilities created during the smoke-test investigation; both also got an
+incidental ruff import-order fix.
+
+Operator audio QA also flagged that "DEFCON" was being pronounced "De-Fe-Kon"
+under Turkish phoneme rules instead of the English-style "Def-Kon" Turkish
+speakers familiar with the term actually use. `_defcon_num_repl` in
+`musahit/tts/preprocessor.py` now respells the TTS-bound text as `Defkon
+{Turkish numeral}` (was `DEFCON {Turkish numeral}`). One-line change in the
+replacement string; written briefing keeps "DEFCON" unchanged — only the
+text that flows into `PiperVoice.synthesize_wav` gets the respelling.
+Preprocessor tests expanded: per-level assertions for all five DEFCON levels
+(replacing the prior two-level spot check), plus guards against silent
+regression to the all-caps form and against false-positive respelling of bare
+DEFCON prose (e.g., "DEFCON ölçeği"). Preprocessor test count 21 → 24 (+3
+methods); full suite 520 passed, 2 skipped.
+
 ## Next
 
 Step 15 — see BOOTSTRAP.md build order. The TTS module is wired and FILE-PROTECTED

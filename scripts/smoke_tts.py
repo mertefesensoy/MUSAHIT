@@ -1,7 +1,9 @@
 ﻿import asyncio
+
 from musahit.common.db import open_connection
 from musahit.tts.piper import PiperPythonClient
 from musahit.tts.synthesizer import Synthesizer
+
 
 async def main():
     with open_connection("data/musahit.duckdb") as conn:

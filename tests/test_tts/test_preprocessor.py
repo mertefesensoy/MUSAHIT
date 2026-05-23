@@ -45,24 +45,56 @@ class TestAbbreviationExpansion:
 
 
 class TestDefconNumbering:
+    """The preprocessor respells ``DEFCON N`` as ``Defkon [Turkish numeral]``.
+
+    The ``Defkon`` respelling is a pronunciation nudge, NOT a
+    translation — operator audio QA on 2026-05-23 found that Piper's
+    Turkish voice was applying Turkish phoneme rules to ``DEFCON``
+    (producing roughly "De-Fe-Kon"). Turkish speakers familiar with
+    the term use the English-style "Def-Kon"; the mixed-case ``k``
+    respelling nudges the voice into the right phoneme path. The
+    written briefing (briefing.md, dashboard HTML) is unchanged.
+    """
+
     def test_defcon_2_to_iki(self) -> None:
         out = preprocess_for_tts("DEFCON 2 seviyesinde değerlendirildi.")
         assert "DEFCON 2" not in out
-        assert "DEFCON İki" in out
+        assert "Defkon İki" in out
 
     def test_defcon_5_to_bes(self) -> None:
         out = preprocess_for_tts("DEFCON 5 olarak işaretlendi.")
-        assert "DEFCON Beş" in out
+        assert "Defkon Beş" in out
 
-    def test_all_defcon_levels_have_turkish(self) -> None:
+    def test_defcon_1_to_bir(self) -> None:
+        out = preprocess_for_tts("DEFCON 1 alarmı.")
+        assert "Defkon Bir" in out
+
+    def test_defcon_3_to_uc(self) -> None:
+        out = preprocess_for_tts("DEFCON 3 olarak sınıflandı.")
+        assert "Defkon Üç" in out
+
+    def test_defcon_4_to_dort(self) -> None:
+        out = preprocess_for_tts("DEFCON 4 gündemine alındı.")
+        assert "Defkon Dört" in out
+
+    def test_all_defcon_levels_use_defkon_respelling(self) -> None:
+        # All five levels respell DEFCON → Defkon and produce a
+        # Turkish numeral. The strict assertion guards against a
+        # silent regression to the un-respelled "DEFCON" form.
         for n in (1, 2, 3, 4, 5):
             out = preprocess_for_tts(f"DEFCON {n}")
-            assert DEFCON_TR_NUMBERS[n] in out
+            assert f"Defkon {DEFCON_TR_NUMBERS[n]}" in out
+            # No remnant of the all-caps form.
+            assert f"DEFCON {n}" not in out
 
     def test_defcon_with_no_numeral_left_alone(self) -> None:
+        # No digit follows → the regex doesn't match → DEFCON stays
+        # untouched. The respelling only fires for the ``DEFCON N``
+        # pattern, not for bare mentions in prose.
         out = preprocess_for_tts("DEFCON ölçeği aşağıdadır.")
-        # No numeric → no rewrite.
         assert "DEFCON ölçeği" in out
+        # Crucially, no false-positive Defkon respelling here.
+        assert "Defkon" not in out
 
 
 # ── Markdown stripping ─────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 ﻿import asyncio
 from pathlib import Path
-from musahit.tts.extractor import extract_voiced_sections
-from musahit.tts.preprocessor import preprocess_for_tts
-from musahit.tts.piper import PiperPythonClient
+
 from musahit.tts.encoder import wav_to_mp3
+from musahit.tts.extractor import extract_voiced_sections
+from musahit.tts.piper import PiperPythonClient
+from musahit.tts.preprocessor import preprocess_for_tts
 
 md = Path("briefings/2026/05/23/briefing.md").read_text(encoding="utf-8")
 print(f"[1] briefing length: {len(md)} chars")

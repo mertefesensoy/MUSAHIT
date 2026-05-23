@@ -134,8 +134,16 @@ def preprocess_for_tts(text: str) -> str:
 
 
 def _defcon_num_repl(match: re.Match[str]) -> str:
+    # Respell ``DEFCON`` as ``Defkon`` for the TTS-bound text only.
+    # Piper's Turkish voice applies Turkish phoneme rules to "DEFCON"
+    # which produces an awkward "De-Fe-Kon"; Turkish speakers familiar
+    # with the term actually use the English-style "Def-Kon". Respelling
+    # with mixed case + the ``k`` consonant nudges the voice into the
+    # right phoneme path without translating the term. The written
+    # briefing (briefing.md, dashboard HTML) keeps "DEFCON" — this
+    # respelling only flows into ``PiperVoice.synthesize_wav``.
     n = int(match.group(1))
-    return f"DEFCON {DEFCON_TR_NUMBERS[n]}"
+    return f"Defkon {DEFCON_TR_NUMBERS[n]}"
 
 
 __all__ = [
