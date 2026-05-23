@@ -39,6 +39,71 @@ HTTP_ERROR, bozo+empty→PARSE_ERROR, bozo+entries→OK (partial). 14 tests, all
 `httpx.MockTransport` (zero network). Full suite: 136 passed, 1 skipped. Incidental ruff
 fix in `musahit/common/migrations.py` (SIM105 try/except/pass → contextlib.suppress).
 
+### Same-day amendment · ADR-014 + ADR-015 · 2026-05-23
+
+Both ADRs landed before step 5 starts, to promote in-flight deviations to canonical record:
+
+- **ADR-014** · article id formula amendment: `sha256(source_id|url)` is now canonical
+  across all ingesters. Extracted to `musahit/common/ids.py::article_id(source_id, url)`.
+  Step 5+ MUST import the helper rather than reimplement.
+- **ADR-015** · article metadata typed columns: `raw_articles` gains `feed_entry_id TEXT NULL`
+  and `canonical_timestamp TIMESTAMP NULL` via migration 002, plus
+  `idx_raw_articles_canonical_ts`. Ingester-specific metadata stays in `headers` JSON.
+- `tests/common/test_ids.py` pins the three formula properties (stability, source-scope,
+  url-scope). `tests/test_rss.py` updated to assert on typed columns. `tests/test_init_db.py`
+  updated to expect `migrations_applied == 2`.
+- Latent bug fixed: DuckDB TIMESTAMP is tz-naive; tz-aware Python datetimes were being
+  silently shifted to local time on insert. RSS now stores naive UTC for `fetched_at` and
+  `canonical_timestamp`.
+- ADR-006 (FILE-PROTECTED) edited with amendment block + inline comment updates — explicitly
+  authorized by ADR-014 and ADR-015's "Required follow-up edits" sections.
+- Full suite: 144 passed, 1 skipped. Ruff clean.
+
+### `musahit/common/time.py` · UTC-naive convention · 2026-05-23
+
+Project-wide rule before step 5: every component that writes a TIMESTAMP to DuckDB MUST
+use `musahit.common.time.utcnow()` (for "now") or `musahit.common.time.to_utc_naive(dt)`
+(to normalize a possibly-aware datetime). DuckDB's TIMESTAMP column is tz-naive and
+silently shifts tz-aware Python datetimes to local time on insert. RSS (step 4) was
+refactored to use the helpers; later stages MUST do the same.
+
+`utcnow() -> datetime` returns naive UTC. `to_utc_naive(dt) -> datetime | None`
+preserves None, returns naive inputs unchanged, and converts tz-aware inputs to UTC
+before stripping tzinfo. 7 tests in `tests/common/test_time.py`.
+
+### Step 5 · `musahit/ingest/html.py` + `html_selectors.py` · 2026-05-23
+
+`HtmlIngester` implements the Ingester Protocol; two-phase fetch (listing → article URLs
+→ per-article pages). httpx async with `MUSAHIT/0.1` UA; selectolax for parsing. Per-source
+CSS selectors in `musahit/ingest/html_selectors.py` (`SelectorConfig` dataclass + 9
+placeholder entries for all kind=HTML sources in the registry). URL dedup before per-article
+fetches (`list(dict.fromkeys(urls))`); rate-limit sleep between fetches (not before first).
+Per-article failures isolated (HTTP, parse) — listing failures abort the source.
+canonical_timestamp chain: JSON-LD → meta tags → Turkish-formatted date regex →
+fetched_at; method name written to `headers.canonical_timestamp_method`. `published_selector`
+narrows step 3 (not a 5th step). `feed_entry_id` is NULL for HTML (ADR-015). Article id via
+shared `musahit.common.ids.article_id`. 16 tests, all pass via `httpx.MockTransport` + injected
+fake sleep. Full suite: 167 passed, 1 skipped. All 9 selector entries are first-pass
+placeholders — first nightly run will surface those needing tuning.
+
+### Step 6 · `musahit/ingest/resmi_gazete.py` + `gazette_parsing.py` · 2026-05-23
+
+`ResmiGazeteIngester` implements the Ingester Protocol; one PDF per day expands into N
+`raw_articles` rows (one per parsed item). Pure parser in `musahit/ingest/gazette_parsing.py`
+with `GazetteSection` (EXECUTIVE/JUDICIAL/ANNOUNCEMENT), `GazetteItemType` (LAW,
+PRESIDENTIAL_DECREE, REGULATION, COMMUNIQUE, APPOINTMENT, COURT_DECISION, OTHER),
+`GazetteItem` dataclass, `parse_gazette_pdf` (PDF→items) and `parse_gazette_pages` (pure
+text→items). Synthetic URL `resmi-gazete://YYYY-MM-DD/<TYPE>/<reference>` feeds the shared
+`article_id`. Today→yesterday URL fallback; Mükerrer probing stops on first 404. Main-PDF
+parse error → PARSE_ERROR; supplement parse error → log + skip. canonical_timestamp =
+publication date at 00:00 UTC (naive). feed_entry_id = extracted reference (NULL when
+empty). Real HTTP URL in `headers.real_pdf_url` for traceability. 38 new tests (29 parser
++ 9 ingester) using hand-crafted fixture PDFs generated once by `reportlab` (not a project
+dep). Full suite: 205 passed, 1 skipped.
+
 ## Next
 
-Step 5 · `musahit/ingest/html.py` — HTML scrape ingester (selectolax) per ADR-003.
+Step 7 · `musahit/ingest/kap.py` — KAP (Kamuyu Aydınlatma Platformu) disclosure ingester.
+Use shared `article_id`, `utcnow`, `to_utc_naive`. KAP exposes corporate disclosures
+(quarterly reports, material events) — likely RSS or JSON API. Confirm endpoint format
+before implementing.

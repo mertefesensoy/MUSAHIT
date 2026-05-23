@@ -1,9 +1,28 @@
 # ADR-006 · Storage
 
-**Status** · Accepted · 2026-05-22
+**Status** · Accepted · 2026-05-22 · Amended 2026-05-23 by ADR-014 and ADR-015
 **Author** · Mert Efe Şensoy
 **Supersedes** · none
-**Cross-references** · ADR-001 · ADR-012
+**Amended by** · ADR-014 (id formula) · ADR-015 (typed metadata columns)
+**Cross-references** · ADR-001 · ADR-012 · ADR-014 · ADR-015
+
+> **Amendment notes** (2026-05-23)
+>
+> - The `raw_articles.id` / `articles.id` schema comment originally read
+>   `hash(source_id, url, fetched_at)`. **ADR-014** supersedes that formula:
+>   the canonical id is `sha256(source_id|url)`, computed by the shared
+>   helper `musahit.common.ids.article_id`. Including `fetched_at` would
+>   break inter-fetch dedup and the foreign-key contract used by
+>   `cluster_articles`, `promotion_log`, and the arc-linking stage.
+> - The `raw_articles` table gains two typed metadata columns under
+>   **ADR-015**: `feed_entry_id TEXT NULL` and
+>   `canonical_timestamp TIMESTAMP NULL`, plus the supporting index
+>   `idx_raw_articles_canonical_ts`. The columns are added by
+>   `scripts/migrations/002_add_article_metadata.sql`. Ingester-specific
+>   metadata still lives in the loose `headers` JSON column.
+>
+> The schema block below documents the original v1 layout. The actual
+> on-disk schema reflects both amendments after migration 002 applies.
 
 ---
 
@@ -42,8 +61,10 @@ CREATE TABLE sources (
 );
 
 -- Raw fetched content · before normalization
+-- After ADR-015 this table also has feed_entry_id and canonical_timestamp
+-- columns; see scripts/migrations/002_add_article_metadata.sql.
 CREATE TABLE raw_articles (
-    id TEXT PRIMARY KEY,                -- hash(source_id, url, fetched_at)
+    id TEXT PRIMARY KEY,                -- sha256(source_id|url) · see ADR-014
     source_id TEXT NOT NULL REFERENCES sources(id),
     url TEXT NOT NULL,
     fetched_at TIMESTAMP NOT NULL,
@@ -55,7 +76,7 @@ CREATE TABLE raw_articles (
 
 -- Normalized article content
 CREATE TABLE articles (
-    id TEXT PRIMARY KEY,                -- same as raw_articles.id
+    id TEXT PRIMARY KEY,                -- same as raw_articles.id · sha256(source_id|url) · ADR-014
     source_id TEXT NOT NULL REFERENCES sources(id),
     url TEXT NOT NULL,
     fetched_at TIMESTAMP NOT NULL,

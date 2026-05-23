@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Generator
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
 import httpx
 import pytest
 
+from musahit.common.ids import article_id
 from musahit.common.migrations import init_db
 from musahit.common.types import IngestStatus
 from musahit.ingest import USER_AGENT, Ingester, IngestResult
-from musahit.ingest.rss import RssIngester, _article_id
+from musahit.ingest.rss import RssIngester
 from musahit.ingest.sources import get_source, seed_sources
 
 # ── Canned response bytes ──────────────────────────────────────────────────
@@ -195,7 +197,8 @@ class TestFetchOk:
 
         rows = ingest_db.execute(
             """
-            SELECT id, source_id, url, fetch_status_code, content_type, headers
+            SELECT id, source_id, url, fetch_status_code, content_type,
+                   feed_entry_id, canonical_timestamp, headers
             FROM raw_articles ORDER BY url
             """
         ).fetchall()
@@ -209,9 +212,14 @@ class TestFetchOk:
             assert row[1] == "bianet"
             assert row[3] == 200
             assert "rss" in row[4]
-            meta = json.loads(row[5])
-            assert meta["feed_entry_id"] in {"guid-1", "guid-2"}
-            assert meta["canonical_published_at"] is not None
+            # Typed columns (ADR-015).
+            assert row[5] in {"guid-1", "guid-2"}
+            assert row[6] is not None  # canonical_timestamp populated
+            # headers JSON now contains only RSS-specific metadata.
+            meta = json.loads(row[7])
+            assert "feed_entry_id" not in meta
+            assert "canonical_published_at" not in meta
+            assert meta["title"] in {"Article One", "Article Two"}
 
     async def test_article_ids_are_deterministic(
         self, ingest_db: duckdb.DuckDBPyConnection
@@ -222,8 +230,8 @@ class TestFetchOk:
 
         ids = {r[0] for r in ingest_db.execute("SELECT id FROM raw_articles").fetchall()}
         expected = {
-            _article_id("bianet", "https://bianet.org/article-one"),
-            _article_id("bianet", "https://bianet.org/article-two"),
+            article_id("bianet", "https://bianet.org/article-one"),
+            article_id("bianet", "https://bianet.org/article-two"),
         }
         assert ids == expected
 
@@ -394,11 +402,19 @@ class TestCanonicalTimestamp:
 
         await ingester.fetch(source)
 
-        row = ingest_db.execute("SELECT headers FROM raw_articles").fetchone()
+        row = ingest_db.execute(
+            "SELECT canonical_timestamp FROM raw_articles"
+        ).fetchone()
         assert row is not None
-        meta = json.loads(row[0])
+        ts = row[0]
         # 08:00 is earlier than 11:00 → canonical timestamp is published.
-        assert meta["canonical_published_at"].startswith("2026-05-23T08:00:00")
+        # DuckDB returns a python datetime for TIMESTAMP columns.
+        assert isinstance(ts, datetime)
+        assert ts.year == 2026
+        assert ts.month == 5
+        assert ts.day == 23
+        assert ts.hour == 8
+        assert ts.minute == 0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

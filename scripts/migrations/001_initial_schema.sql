@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS arc_centroids (
 
 -- ── Raw fetched content ────────────────────────────────────────────────────--
 -- Stored before normalization. Pruned after 90 days (ADR-012).
--- id = hash(source_id, url, fetched_at).
+-- id = sha256(source_id|url) · see ADR-014 (formula amendment).
+-- Typed metadata columns (feed_entry_id, canonical_timestamp) are added by
+-- migration 002 per ADR-015.
 CREATE TABLE IF NOT EXISTS raw_articles (
     id                TEXT      PRIMARY KEY,
     source_id         TEXT      NOT NULL REFERENCES sources(id),
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS raw_articles (
 
 -- ── Normalized article content ─────────────────────────────────────────────--
 -- entities is a JSON array of {type, text, span}.
+-- id is the SAME value as raw_articles.id · sha256(source_id|url) · ADR-014.
 CREATE TABLE IF NOT EXISTS articles (
     id           TEXT      PRIMARY KEY,
     source_id    TEXT      NOT NULL REFERENCES sources(id),

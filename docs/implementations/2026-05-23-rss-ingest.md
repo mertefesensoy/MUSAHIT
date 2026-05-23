@@ -290,5 +290,72 @@ Goal-criteria mapping:
 - ADR-012 — failure isolation; defines the `IngestResult` contract and the per-source
   isolation model
 - ADR-013 — source registry amendments (`bloomberg_ht`, `x_stub`)
+- ADR-014 — article id formula amendment (same day; supersedes the ADR-006 inline
+  comment; promotes the formula deviation noted in this doc to canonical record)
+- ADR-015 — article metadata typed columns (same day; supersedes the headers-JSON
+  storage pattern described above)
 - `docs/implementations/2026-05-22-init-db.md` — step 2, schema + migration runner
 - `docs/implementations/2026-05-22-common-layer.md` — step 1, shared types and config
+
+---
+
+## ❯ Same-day amendment · 2026-05-23 · ADR-014 + ADR-015
+
+Two ADRs landed the same day as step 4 to promote in-flight deviations to canonical
+record before step 5 starts. Both were authored after this doc shipped; the doc body
+above is preserved as the snapshot at first delivery. This section captures the diff.
+
+### What changed in this codebase
+
+1. **Article id formula is now a shared helper.** The `_article_id` private helper
+   that lived inside `musahit/ingest/rss.py` moved to `musahit/common/ids.py` as
+   `article_id(source_id, url) -> str`. The formula is unchanged
+   (`sha256(source_id|url)`), but every ingester from step 5 onward MUST import the
+   helper rather than re-deriving the formula. ADR-014 makes this the canonical
+   contract; drift between ingesters was the risk this consolidation prevents.
+2. **Universal metadata moved out of `headers` JSON.** `feed_entry_id` and
+   `canonical_timestamp` are now typed columns on `raw_articles` (TEXT NULL and
+   TIMESTAMP NULL respectively), added by
+   `scripts/migrations/002_add_article_metadata.sql`. The RSS ingester writes them
+   to the columns; the normalize stage will read the typed contract instead of
+   reaching into JSON. RSS-specific keys (`title`, `summary`, `author`, raw
+   `published`/`updated` strings, `etag`, `last_modified`) stay in `headers`.
+3. **Supporting index.** `idx_raw_articles_canonical_ts` indexes
+   `canonical_timestamp` per ADR-015 — the cluster stage's 24-hour window query
+   will use it.
+4. **Inline comments in `001_initial_schema.sql`.** Both `raw_articles.id` and
+   `articles.id` comments now read `sha256(source_id|url) · see ADR-014`. SQL
+   comments are documentation; no migration was required to amend them.
+5. **ADR-006 cross-references.** The accepted ADR-006 (FILE-PROTECTED) gained a top
+   amendment block plus inline comment edits pointing to ADR-014 and ADR-015. This
+   edit to a protected file was explicitly authorized by the new ADRs themselves
+   per their "Required follow-up edits" sections.
+
+### Test-side changes
+
+- `tests/test_rss.py` updated to read the typed columns instead of `headers` JSON
+  for `feed_entry_id` and `canonical_timestamp`, and to import `article_id` from
+  the new helper module.
+- `tests/test_init_db.py` updated to expect `migrations_applied == 2` (was 1).
+- `tests/common/test_ids.py` is new — pins the three contract properties of the
+  formula (stability across calls, source-scoped, url-scoped) plus a hex-shape
+  guard and a separator-collision guard.
+
+### Subtle correctness fix found during the refactor
+
+DuckDB's `TIMESTAMP` column is tz-naive and silently converts tz-aware Python
+datetimes to *local time* on insert. On the operator's UTC+3 machine, an 08:00
+UTC publish time was being stored as 11:00. The RSS test that hard-coded the
+expected hour caught the regression. Fix: `_canonical_timestamp` and `fetched_at`
+now return / use **naive UTC** datetimes (`.replace(tzinfo=None)` after
+computing in UTC). The same shift was latent for `fetched_at` before this fix;
+no test was sensitive to it, but the value would have been wrong by the operator's
+UTC offset.
+
+### Why this got documented inline rather than in a fresh doc
+
+Same-day amendment by the operator-as-author of both ADRs and this implementation.
+Splitting into a second implementation doc would scatter the same-day diff across
+two files and force the next reader to follow a breadcrumb trail. The single
+doc-with-amendment-section is the lighter footprint and matches how ADR-013 was
+amended into ADR-003 (in-place note plus a separate amendment ADR).

@@ -3,26 +3,19 @@
 Per ADR-003 the ingest stage uses :mod:`feedparser` to parse feed bytes and
 :mod:`httpx` to fetch them — feedparser's own ``urllib`` fetcher would block
 the event loop, ignore ``rate_limit_seconds``, and surface only a small subset
-of the failures we want to record. Per ADR-006 every entry lands in
-``raw_articles`` keyed by a deterministic id. Per ADR-012 the ``fetch`` method
-NEVER raises for expected failures; it returns a structured :class:`IngestResult`
-so a single broken source does not abort the run.
+of the failures we want to record. Per ADR-006 (as amended by ADR-014 and
+ADR-015) every entry lands in ``raw_articles`` keyed by a deterministic id
+with the universal metadata stored in typed columns; ingester-specific
+metadata stays in the loose ``headers`` JSON column. Per ADR-012 the ``fetch``
+method NEVER raises for expected failures; it returns a structured
+:class:`IngestResult` so a single broken source does not abort the run.
 
-Article-id design
------------------
-``id = sha256(source_id + "|" + entry_url)``
-
-The ADR-006 schema comment names ``hash(source_id, url, fetched_at)`` as the
-identifier, but including ``fetched_at`` would defeat inter-fetch dedup (every
-re-fetch would mint a new id and INSERT OR IGNORE would never fire). We treat
-the comment as descriptive and use the natural unique key — the entry URL —
-which keeps the row stable across re-fetches and still uniquely identifies
-the article for normalization.
+The canonical article id is computed by :func:`musahit.common.ids.article_id`
+— see ADR-014 for the formula and the rationale.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -31,7 +24,9 @@ import duckdb
 import feedparser
 import httpx
 
+from musahit.common.ids import article_id
 from musahit.common.logging import get_logger
+from musahit.common.time import to_utc_naive, utcnow
 from musahit.common.types import IngestStatus
 from musahit.ingest import USER_AGENT, IngestResult
 from musahit.ingest.sources import Source
@@ -42,15 +37,6 @@ DEFAULT_TIMEOUT_SECONDS: float = 30.0
 
 
 # ── Pure helpers ────────────────────────────────────────────────────────────
-
-
-def _article_id(source_id: str, entry_url: str) -> str:
-    """Deterministic per-article identifier.
-
-    Excludes ``fetched_at`` so that re-fetching the same entry produces the
-    same id — required for inter-fetch dedup via ``ON CONFLICT DO NOTHING``.
-    """
-    return hashlib.sha256(f"{source_id}|{entry_url}".encode()).hexdigest()
 
 
 def _entry_url(entry: Any) -> str | None:
@@ -74,13 +60,17 @@ def _entry_feed_id(entry: Any) -> str | None:
     return entry.get("id") or entry.get("guid") or entry.get("link")
 
 
-def _canonical_timestamp(entry: Any) -> str | None:
-    """ISO-8601 string of the earlier of ``published`` and ``updated``.
+def _canonical_timestamp(entry: Any) -> datetime | None:
+    """``datetime`` of the earlier of ``published`` and ``updated`` (naive UTC).
 
     Some feeds emit only one of the two; some emit both with ``updated`` set
     to a stale value. We prefer the earlier timestamp because it represents
     the moment the article first became visible, which is what arc-linking
     in ADR-008 cares about. Returns ``None`` if neither field parses.
+
+    The DuckDB tz-naive convention (see ``musahit.common.time``) is enforced
+    via :func:`to_utc_naive` so the stored value matches the source feed
+    regardless of the host's local timezone.
     """
     candidates: list[datetime] = []
     for field in ("published_parsed", "updated_parsed"):
@@ -93,7 +83,7 @@ def _canonical_timestamp(entry: Any) -> str | None:
             continue
     if not candidates:
         return None
-    return min(candidates).isoformat()
+    return to_utc_naive(min(candidates))
 
 
 # ── Ingester ────────────────────────────────────────────────────────────────
@@ -178,7 +168,9 @@ class RssIngester:
                 error=f"feedparser bozo: {bozo_exc}",
             )
 
-        fetched_at = datetime.now(UTC)
+        # Naive UTC per musahit.common.time — DuckDB TIMESTAMP is tz-naive
+        # and would silently shift tz-aware datetimes to local time.
+        fetched_at = utcnow()
         inserted = self._persist(source, response, entries, fetched_at)
         log.info("rss_ok", inserted=inserted, total_entries=len(entries))
         return IngestResult(status=IngestStatus.OK, count=inserted)
@@ -198,11 +190,16 @@ class RssIngester:
           1. Intra-fetch: a ``seen`` set on the feed-provided entry id drops
              duplicate ``<item>`` blocks within the same response.
           2. Inter-fetch: ``ON CONFLICT (id) DO NOTHING`` on the deterministic
-             article id drops entries already present from a prior fetch.
+             article id (per ADR-014) drops entries already present from a
+             prior fetch.
 
         Returns the number of *new* rows actually written (computed as the
         delta in ``COUNT(*)``). This is what the caller surfaces as
         :attr:`IngestResult.count`.
+
+        Per ADR-015 the universal metadata (``feed_entry_id``,
+        ``canonical_timestamp``) is written to typed columns; RSS-specific
+        metadata stays in the ``headers`` JSON column.
         """
         seen_entry_ids: set[str] = set()
         rows: list[tuple[Any, ...]] = []
@@ -217,28 +214,33 @@ class RssIngester:
                 continue
             seen_entry_ids.add(feed_entry_id)
 
-            article_id = _article_id(source.id, url)
-            metadata = {
-                "feed_entry_id": feed_entry_id,
+            row_id = article_id(source.id, url)
+            canonical_ts = _canonical_timestamp(entry)
+            ingester_metadata = {
+                # RSS-specific metadata — per ADR-015 examples.
                 "title": entry.get("title"),
                 "summary": entry.get("summary"),
                 "author": entry.get("author"),
-                "canonical_published_at": _canonical_timestamp(entry),
+                # Raw feed timestamp strings, kept for audit/debug; the
+                # canonical value lives in the typed column.
                 "published": entry.get("published"),
                 "updated": entry.get("updated"),
+                # HTTP cache validators for conditional re-fetches later.
                 "etag": response.headers.get("etag"),
                 "last_modified": response.headers.get("last-modified"),
             }
             rows.append(
                 (
-                    article_id,
+                    row_id,
                     source.id,
                     url,
                     fetched_at,
                     bytes(response.content),
                     response.headers.get("content-type"),
-                    json.dumps(metadata, ensure_ascii=False),
+                    json.dumps(ingester_metadata, ensure_ascii=False),
                     response.status_code,
+                    feed_entry_id,
+                    canonical_ts,
                 )
             )
 
@@ -250,9 +252,10 @@ class RssIngester:
             """
             INSERT INTO raw_articles (
                 id, source_id, url, fetched_at,
-                raw_content, content_type, headers, fetch_status_code
+                raw_content, content_type, headers, fetch_status_code,
+                feed_entry_id, canonical_timestamp
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO NOTHING
             """,
             rows,
