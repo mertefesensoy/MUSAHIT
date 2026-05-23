@@ -70,7 +70,7 @@ class TestFreshInit:
         result = init_db(tmp_path / "x.duckdb", load_vss=False)
         assert result == {
             "vss_loaded": False,
-            "migrations_applied": 2,
+            "migrations_applied": 3,
             "hnsw_indices_created": 0,
         }
 
@@ -87,7 +87,7 @@ class TestFreshInit:
     def test_in_memory_path_skips_mkdir(self) -> None:
         # :memory: must not attempt to create parent dirs (it has no path).
         result = init_db(":memory:", load_vss=False)
-        assert result["migrations_applied"] == 2
+        assert result["migrations_applied"] == 3
 
 
 # ── TestRerunIsNoOp ────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ class TestRerunIsNoOp:
         init_db(db_path, load_vss=False)
         with _open_ro(db_path) as conn:
             count = conn.execute("SELECT count(*) FROM schema_version").fetchone()[0]
-        assert count == 2
+        assert count == 3
 
     def test_second_run_does_not_raise(self, tmp_path: Path) -> None:
         db_path = tmp_path / "x.duckdb"
@@ -179,7 +179,7 @@ class TestVssLoadFailureIsSoft:
 
         monkeypatch.setattr(migrations, "_install_and_load_vss", _fail)
         result = init_db(tmp_path / "x.duckdb", load_vss=True)
-        assert result["migrations_applied"] == 2
+        assert result["migrations_applied"] == 3
 
     def test_schema_complete_after_vss_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

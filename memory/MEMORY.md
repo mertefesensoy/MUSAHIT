@@ -148,3 +148,25 @@ listen end-to-end before moving to the next step. The DEFCON
 respelling and regex tightening on 2026-05-23 are the canonical 
 example: 525 tests stayed green across three commits while three 
 distinct pronunciation issues were caught and fixed by ear alone.
+
+
+### No em or en dashes
+
+Middle dot (·) is the only permitted separator across the codebase ·
+docs · scripts · ADRs · briefings. Em dashes (—) and en dashes (–)
+are project convention violations. This convention is carried over
+from SuperconducTED and applies to every file in this repo
+including PowerShell scripts and operator documentation. If
+Claude Code finds itself using an em dash, that is a signal to stop
+and convert it to a middle dot before committing.
+
+Strict · no exceptions for numeric ranges, prose pauses, or table
+cells. The character set is U+2014 (em dash) and U+2013 (en dash);
+both must be replaced with U+00B7 (middle dot). The convention was
+discovered the hard way during the first smoke run on 2026-05-23:
+an em dash in `scripts/run_first_smoke.ps1` was saved as multi-byte
+UTF-8 bytes that PowerShell mis-decoded under the Windows-1252
+console codepage, producing a parse error. PowerShell scripts (.ps1)
+with non-ASCII characters MUST be saved as UTF-8 with BOM
+(`utf-8-sig` / `Out-File -Encoding utf8BOM`) so the parser reads
+multi-byte sequences correctly regardless of the active codepage.

@@ -8,7 +8,7 @@ The DB path comes from Settings (config.toml / environment). To use a custom
 path set DB_PATH in the environment or edit config.toml before running.
 
 Safe to rerun: migrations already applied are skipped; HNSW indices are created
-idempotently. VSS extension failure is non-fatal — schema still applies without
+idempotently. VSS extension failure is non-fatal · schema still applies without
 vector-search indices.
 """
 

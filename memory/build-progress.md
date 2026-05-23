@@ -414,7 +414,153 @@ the post-respelling header chunk (`Zirve Defkon İki`) rather than the
 pre-respelling form. Preprocessor tests 24 → 30 (+6); full suite 525 passed,
 2 skipped.
 
+### Step 15 · `musahit/pipeline.py` + `orchestrator.py` + `stages.py` · 2026-05-23
+
+Top-level pipeline orchestrator. Binds the seven stages (ingest · normalize ·
+cluster · score · arc-link · write · tts) into one nightly run with checkpoint
+resumability per ADR-007, per-stage timing budgets per ADR-007 § Pipeline
+timing budget, Ollama model lifecycle per ADR-001 § Single Ollama instance,
+and failure isolation per ADR-012 § Failure isolation by stage.
+
+`Orchestrator(conn, settings, *, stage_factory, ollama, timing_budgets,
+disk_check_path)`. Constructor-injected `stage_factory: Callable[[str], Stage]`
+lets tests pass fakes — production uses `DefaultStageFactory` which lazily
+constructs the seven real stages (IngestPoller, Normalizer, Clusterer,
+Classifier, ArcLinker, Briefer, Synthesizer) with their real Ollama / Piper
+clients on demand. `DryRunStageFactory` returns `_NoOpStage` stubs (no DB
+writes, no I/O) for `--dry-run`.
+
+Per stage: skip if in `stages_done` and not `--force`; skip if `--stage NAME`
+filter and name doesn't match; load required Ollama models (cluster→bge-m3,
+score→qwen2.5, write→trendyol; others none); construct stage; run with
+`asyncio.wait_for(timeout=soft_minutes*2)`. On success append to stages_done.
+On soft failure: `traceback.print_exc(sys.stderr)` (step-14 diagnostic pattern)
++ structured log + `failed_stages` JSON list, continue. After stage: unload
+the model the stage held. Catastrophic conditions (KeyboardInterrupt /
+DiskPressureError / duckdb.IOException) wrap as `_CatastrophicError`, mark
+pipeline_runs.status=FAILED, preserve stages_done, re-raise so CLI exits 2
+(SIGINT) or 1 (others). Pre-flight disk check via shutil.disk_usage against
+Settings.min_free_disk_gb (default 5 GB) → raises DiskPressureError before
+stage 1.
+
+`OllamaModelManager.load(model)` POSTs `/api/generate` with empty prompt and
+`keep_alive: "5m"` to warm-cache the model; `.unload(model)` posts same body
+with `keep_alive: 0` for immediate eviction. Failures swallowed at WARN — the
+stage that needs the model will fail with a specific error.
+
+`Stage` Protocol: `async run(run_id: str) -> Any` (Any so dict-returning real
+stages structurally match). `STAGE_ORDER` 7-tuple keyed off the canonical
+stage names (arc-link with hyphen matches what step 12 already writes to
+stages_done). `StageTimingBudget(soft_minutes: float)` with `soft_seconds`
+and `timeout_seconds` properties; STAGE_BUDGETS pulled from ADR-007's
+01:00→07:00 schedule (ingest 60, normalize 30, cluster 60, score 60,
+arc-link 30, write 60, tts 30). Float type lets tests use fractional-minute
+budgets (e.g., 0.0005 min = 30 ms) for timeout-path coverage.
+
+CLI at `musahit/pipeline.py`: argparse subcommands `run`/`status`/`resume`.
+`--date today|YYYY-MM-DD` (default today via `tr_local_date()`). `--stage NAME`
+filter. `--force` re-runs completed stages. `--dry-run` uses NoOp stages and
+skips DB writes. Exit codes: 0 COMPLETED, 1 FAILED, 2 SIGINT.
+`configure_logging()` first thing in main().
+
+Schema migration `003_add_failed_stages.sql` — additive: `ALTER TABLE
+pipeline_runs ADD COLUMN IF NOT EXISTS failed_stages TEXT`. Backward-compatible
+with the FILE-PROTECTED `IngestPoller` (no column reference there).
+`test_init_db.py` updated: 6 occurrences of `migrations_applied == 2` →
+`== 3`, plus the `schema_version` row-count assertion (`== 2` → `== 3`).
+
+33 new tests: 16 in `test_orchestrator.py` (happy path, soft failure, timeout,
+resume, --force, --stage, --dry-run, model lifecycle, disk pressure,
+KeyboardInterrupt, stderr traceback) + 17 in `test_pipeline_cli.py`
+(subcommand parsing, date resolution, flag plumbing, exit codes, output
+summary, `configure_logging` ordering with Orchestrator stub). Full suite:
+558 passed, 2 skipped (was 525/2; +33 pass, 0 new skips).
+
+FILE-PROTECTED list untouched. The orchestrator instantiates `IngestPoller`
+via the factory but does not modify the protected file.
+
+**Phase 3 expands: TTS (step 14) and orchestrator (step 15) are in. Liveness
+probe (step 18) and dashboard (step 19+) follow.**
+
+### Step 16 prep · first smoke-run scaffolding · 2026-05-23
+
+No code changes — three operator-facing artifacts to support the first
+real end-to-end run against real Turkish sources and real Ollama / Piper
+models:
+
+- `memory/operator-tasks.md` — structured backlog for first-run findings.
+  Three buckets: Pending (must address before step 17), First-month
+  tuning (address during operation), Resolved (with date). Each entry is
+  a one-liner; long context belongs in `docs/implementations/` or an ADR
+  amendment. The file starts empty; the operator populates it as
+  findings surface during the smoke run and the early operational weeks.
+- `scripts/run_first_smoke.ps1` — one-command launcher. Five pre-flight
+  checks: required Ollama models present (`qwen2.5:7b-instruct-q4_K_M`,
+  `serkandyck/trendyol-llm-7b-chat-v1.8-gguf`, `bge-m3`); Piper voice
+  ONNX exists; ≥ 5 GB free on the data drive; DuckDB migration version
+  == 3; data directory writable. Each check is colour-coded PASS/FAIL.
+  Runs `python -m musahit.pipeline run --date <date>` with
+  `Tee-Object` capturing stdout to `logs/smoke-<timestamp>.jsonl`. On
+  COMPLETED prints briefing artifact paths and next-step pointers; on
+  FAILED prints last-50-line log tail + diagnostic suggestions (which
+  stages completed, how to inspect failed_stages, how to retry single
+  stages or resume).
+- `docs/operator/first-smoke-run-guide.md` — operator runbook. TL;DR
+  command, pre-flight checklist (URL + selector audit caveats for the
+  7 unverified RSS sources and 9 placeholder HTML selectors, model
+  pulls, Piper voice download, ffmpeg, Reddit creds, disk space, DB
+  schema). Per-stage timing guesses (ingest 30-60min, normalize 5-10,
+  cluster 10-20, score 30-90, arc 5-10, write 15-30, tts 5-10) against
+  ADR-007 soft budgets. "What to expect from first run" framing —
+  5-15 first-run findings is expected, not a failure mode; the
+  always-ships invariant means the briefing still produces even when
+  components fail. Inspection helpers: briefing artifact reading,
+  `pipeline status` command, a python -c block for per-stage ingest
+  counts / DEFCON distribution / arc states / failed_stages, structured-
+  log greps. Retry shapes: `--resume`, `--force`, `--stage NAME`,
+  backfill with explicit `--date`, `--dry-run`. Where to file each
+  finding type.
+
+Smoke run itself is operator-driven from here. Findings will accumulate
+in `memory/operator-tasks.md` and feed step 17's scope. No tests added;
+no code changed; ruff + pytest still pass (verified).
+
+### Step 16 prep · smoke-script parse-error fix · 2026-05-23
+
+First attempted smoke run surfaced two parse errors in
+`scripts/run_first_smoke.ps1` before the pipeline could start:
+
+1. `$_.Length / 1KB` inside a nested `$()` subexpression in a double-
+   quoted string: the PowerShell byte-multiplier constant `1KB` is
+   ambiguous in that context, parser fails with "Unexpected token 'KB'".
+   Replaced with the literal integer `1024`.
+2. Em dash (U+2014) on lines 68 and 220 was saved as multi-byte UTF-8
+   bytes that PowerShell mis-decoded under Windows-1252 codepage,
+   producing a second parse error. Em dash also violates the
+   project-wide middle-dot convention (now formalised in MEMORY.md
+   under "No em or en dashes").
+
+Fix: replaced every em/en dash with middle dot in `scripts/` (5
+files: `run_first_smoke.ps1`, `init_db.py`, `migrations/002_*.sql`,
+`migrations/003_*.sql`) and `docs/operator/first-smoke-run-guide.md`
+(32 dash occurrences across the runbook · ranges, prose, table cells).
+`run_first_smoke.ps1` re-saved as UTF-8 with BOM (`utf-8-sig`) +
+CRLF line endings so PowerShell reads non-ASCII correctly under the
+default Windows-1252 console codepage.
+
+Verified via `[System.Management.Automation.Language.Parser]::ParseFile`
+which returned PARSE_OK with no errors. Smoke run can now begin.
+
+MEMORY.md gained the "No em or en dashes" convention block: middle
+dot (·) is the only permitted separator; .ps1 files must be saved as
+UTF-8 with BOM. The convention is strict · no exceptions for numeric
+ranges, prose pauses, or table cells.
+
+No code module changes · no tests · no ADR amendments · 558 passed,
+2 skipped stays.
+
 ## Next
 
-Step 15 — see BOOTSTRAP.md build order. The TTS module is wired and FILE-PROTECTED
-adjacent (no changes to the protected list yet).
+Step 16 smoke run · operator-driven via `scripts/run_first_smoke.ps1`.
+Step 17 scope determined by what surfaces in `memory/operator-tasks.md`
+during the run.

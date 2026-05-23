@@ -2,8 +2,8 @@
 -- Applied by scripts/init_db.py · tracked in schema_version.
 -- Per ADR-015 (article metadata typed columns).
 --
--- Two values that every ingester plausibly produces — `feed_entry_id` and
--- `canonical_timestamp` — are promoted out of the loose `headers` JSON column
+-- Two values that every ingester plausibly produces · `feed_entry_id` and
+-- `canonical_timestamp` · are promoted out of the loose `headers` JSON column
 -- and into typed nullable columns so the normalize/cluster/arc-link stages
 -- have a stable contract to read against. Ingester-specific quirks (feed-
 -- claimed author, Reddit score, KAP disclosure code, etc.) remain in
