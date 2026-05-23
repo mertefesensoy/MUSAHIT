@@ -273,10 +273,30 @@ Arc-updates formula now reads `min(arc.peak_defcon, cluster.final_defcon)` with 
 directional reasoning inline. No code change; no test change. The flagged bug from the
 step-12 impl doc is now closed.
 
+### Step 13 · `musahit/writer/` · 2026-05-23
+
+First Trendyol-LLM stage. `Briefer.run(run_id)` builds a `BriefingPayload` from the DB,
+calls the writer LLM with `build_writer_prompt(payload)`, validates the output via
+`validate_briefing_markdown` (8 required ❯-prefixed `##` sections in ADR-009 order,
+exact marker match, no extra top-level sections), retries up to 3 times with the
+validator's errors appended to the prompt, and falls through to
+`render_fallback_briefing(payload)` (deterministic Python renderer that always passes
+the validator) if all retries fail. Writes `briefings/YYYY/MM/DD/briefing.md` and
+upserts the `briefings` row (PRIMARY KEY = date, per-date idempotent). Reuses the
+`LlmClient` Protocol + `FakeLlmClient` from step 11 — model string is
+`serkandyck/trendyol-llm-7b-chat-v1.8-gguf` per the ADR-002 amendment landed earlier today.
+`config.toml` + `Settings.writer_model` updated to match. Estimated worst-case prompt ~13K
+tokens (comfortably under Trendyol-LLM's 32K context window); a test guard pins it
+under ~16K chars. 47 new tests across `tests/test_writer/`. Full suite: 444 passed, 1
+skipped. stages_done += "write".
+
+**Phase 2 (processing) complete via the writer; Phase 3 (delivery) is next.**
+
 ## Next
 
-Step 13 · `musahit/score/promotion.py` already exists (built in step 11); next is
-step 13 in BOOTSTRAP.md sequence — `musahit/writer/` Trendyol-LLM briefing renderer.
-The writer reads arcs + clusters + promotion_log and emits the markdown briefing per
-ADR-009. First Trendyol-LLM stage; reuses the LlmClient Protocol from step 11 with a
-new FakeLlmClient instance for tests.
+Step 14 · `musahit/tts/` — Piper TTS audio synthesis per ADR-010. Reads
+`briefing.md`, extracts the voiced scope (header + DEFCON 1-2 + DEFCON 3 + AÇIK
+GELİŞMELER per ADR-009 § TTS scope), invokes `piper-tts` to produce
+`briefings/YYYY/MM/DD/briefing.mp3`, updates `briefings.audio_path`. No LLM call.
+Local subprocess to Piper; tests use a fake Piper invocation that writes a placeholder
+mp3 byte string.

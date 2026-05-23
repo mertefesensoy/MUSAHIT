@@ -13,7 +13,7 @@ piper_voice_path = "voices/tr_TR-dfki-medium.onnx"
 # Ollama
 ollama_base_url = "http://localhost:11434"
 worker_model = "qwen2.5:7b-instruct-q4_K_M"
-writer_model = "trendyol-llm-7b-q4"
+writer_model = "serkandyck/trendyol-llm-7b-chat-v1.8-gguf"
 embed_model = "bge-m3:latest"
 
 # Worker model parameters (ADR-002)

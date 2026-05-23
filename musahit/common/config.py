@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # --- Ollama (ADR-002) ---
     ollama_base_url: str = "http://localhost:11434"
     worker_model: str = "qwen2.5:7b-instruct-q4_K_M"
-    writer_model: str = "trendyol-llm-7b-q4"
+    writer_model: str = "serkandyck/trendyol-llm-7b-chat-v1.8-gguf"
     embed_model: str = "bge-m3:latest"
 
     # --- Worker model parameters (ADR-002) ---
