@@ -18,33 +18,31 @@ is needed, link to a docs/implementations/ or docs/operator/ file.
 
 ---
 
-## Pending (must address before step 17)
+## Pending · step-17 blockers
 
-_(empty — populated by the first real smoke run)_
+- [ ] Arc-link counter bug · 240 clusters all collided on arc_20260523_0001
+- [ ] DEFCON-3 promotion broken · all 239 classified stories landed in
+      DEFCON 4 · investigate ADR-005 promotion ceiling against real model
+      outputs · was working in tests, fails on real data
+- [ ] Trendyol left literal template placeholders in two sections
+      ("[içerik buraya · şablon talimatlarına bak]") · validator missed
+      it · either tighten validator to reject the placeholder string OR
+      fix the writer prompt so the model doesn't echo template
+      instructions
+- [ ] Category enum has no buckets for natural disasters, weather,
+      accidents · Qwen2.5 defaults to EKONOMİ for all of them · either
+      add categories (DOĞAL_AFET, KAZA, HAVA, SAĞLIK) or document that
+      mis-categorization to EKONOMİ is the known fallback
+- [ ] DIPLOMASİ enum case-folding · Qwen2.5 returns undotted-I form
 
-<!--
-Example shape (delete this comment block once real items land):
+## First-month tuning
 
-- [ ] Anadolu Ajansı RSS URL returns 404 · `musahit/ingest/sources.py` ·
-      placeholder URL needs operator verification
-- [ ] Trendyol-LLM produces empty header section on dry inputs ·
-      `musahit/writer/prompt.py` · prompt may need a header reminder
-- [ ] cluster stage exceeded its 60-minute soft budget · ADR-007 revisit
--->
-
-
-## First-month tuning (address during operation)
-
-_(empty — populated as run-history accumulates)_
-
-<!--
-Example shape:
-
-- [ ] tune Reddit min_score from 50 → 75 if too noisy · operator review
-      after 14 nights
-- [ ] consider adding a 10th category if "POLİTİKA" bucket grows past
-      40% of clusters · per ADR-016 trigger
--->
+- [ ] 11 source failures in this run · file individually with the actual
+      error message from SİSTEM LOG
+- [ ] Resmi Gazete and tcmb timing out at 180s · either increase timeout
+      or split fetch
+- [ ] Reddit creds still not configured · this run's SİSTEM LOG doesn't
+      show reddit at all (expected · SKIPPED path)
 
 
 ## Resolved
