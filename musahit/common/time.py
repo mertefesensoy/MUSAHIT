@@ -29,7 +29,12 @@ See ADR-001 (architecture overview, single-machine local pipeline).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+
+# Türkiye Standard Time is UTC+3 year-round. DST was abolished in 2016 and
+# has not been reintroduced as of this writing. The offset is hard-coded
+# here so callers do not have to deal with zoneinfo databases on Windows.
+_TR_UTC_OFFSET: timedelta = timedelta(hours=3)
 
 
 def utcnow() -> datetime:
@@ -71,4 +76,19 @@ def to_utc_naive(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC).replace(tzinfo=None)
 
 
-__all__ = ["to_utc_naive", "utcnow"]
+def tr_local_date() -> date:
+    """Return today's date in Türkiye local time.
+
+    Türkiye is UTC+3 year-round (no DST since 2016) so the conversion is a
+    fixed three-hour shift on top of :func:`utcnow`. Used by ingesters
+    whose source publishes on a Türkiye-local calendar (currently Resmî
+    Gazete; Reddit relies on it via the rolling-window logic).
+
+    Centralising the shift here means a future Türkiye DST decision is a
+    one-line edit to this module rather than a hunt-and-fix across every
+    ingester.
+    """
+    return (datetime.now(UTC) + _TR_UTC_OFFSET).date()
+
+
+__all__ = ["to_utc_naive", "tr_local_date", "utcnow"]

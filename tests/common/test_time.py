@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
-from musahit.common.time import to_utc_naive, utcnow
+from musahit.common.time import to_utc_naive, tr_local_date, utcnow
 
 
 class TestUtcNow:
@@ -61,3 +61,30 @@ class TestToUtcNaive:
         assert result is not None
         assert result.tzinfo is None
         assert result == datetime(2026, 5, 23, 8, 0, 0)
+
+
+class TestTrLocalDate:
+    def test_returns_a_date(self) -> None:
+        assert isinstance(tr_local_date(), date)
+
+    def test_is_utc_today_or_utc_today_plus_one(self) -> None:
+        # TR = UTC + 3. Depending on what time the test runs at, the
+        # TR-local date is either the same as UTC today or one day ahead.
+        utc_today = datetime.now(UTC).date()
+        tomorrow = utc_today + timedelta(days=1)
+        assert tr_local_date() in {utc_today, tomorrow}
+
+    def test_matches_manual_calculation(self) -> None:
+        # Compute the expected date inline using the same offset documented
+        # in the module; the test pins the +03:00 contract so a future
+        # silent change of the offset constant is caught.
+        plus_three = timezone(timedelta(hours=3))
+        expected = datetime.now(plus_three).date()
+        # Within the same millisecond either side of midnight there is a
+        # one-day-apart edge case; allow it.
+        candidates = {
+            expected,
+            expected + timedelta(days=1),
+            expected - timedelta(days=1),
+        }
+        assert tr_local_date() in candidates

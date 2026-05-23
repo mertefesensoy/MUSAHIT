@@ -38,7 +38,7 @@ import httpx
 
 from musahit.common.ids import article_id
 from musahit.common.logging import get_logger
-from musahit.common.time import to_utc_naive, utcnow
+from musahit.common.time import to_utc_naive, tr_local_date, utcnow
 from musahit.common.types import IngestStatus
 from musahit.ingest import USER_AGENT, IngestResult
 from musahit.ingest.gazette_parsing import GazetteItem, parse_gazette_pdf
@@ -49,17 +49,8 @@ _log = get_logger("musahit.ingest.resmi_gazete")
 DEFAULT_TIMEOUT_SECONDS: float = 60.0  # PDF fetches are larger than HTML/RSS.
 DEFAULT_MAX_MUKERRER: int = 5
 
-# Türkiye is UTC+3 year-round (no DST since 2016); the Gazette publishes on
-# Türkiye-local dates, so we shift UTC by +3 to get the local "today".
-_TR_UTC_OFFSET = timedelta(hours=3)
-
 ParsePdfFn = Callable[[bytes, date], list[GazetteItem]]
 SleepFn = Callable[[float], Awaitable[None]]
-
-
-def _tr_today() -> date:
-    """Türkiye-local current date (no DST since 2016)."""
-    return (datetime.now(UTC) + _TR_UTC_OFFSET).date()
 
 
 def _build_pdf_url(target_date: date, mukerrer: int = 0) -> str:
@@ -131,7 +122,7 @@ class ResmiGazeteIngester:
     ) -> IngestResult:
         log = _log.bind(source_id=source.id)
 
-        target_date = self._target_date or _tr_today()
+        target_date = self._target_date or tr_local_date()
         candidates = [target_date, target_date - timedelta(days=1)]
 
         main_response: httpx.Response | None = None
