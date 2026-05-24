@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" aria-label="MÜŞAHİT DEFCON ladder">
+  <title>MÜŞAHİT DEFCON severity ladder</title>
+  <desc>Six tier severity ladder used to classify Turkish news clusters · DEFCON 1 (existential) through DEFCON 5 (routine) plus AMBIENT (background noise).</desc>
+
+  <style>
+    .bg { fill: #0a0e0d; }
+    .header-main { fill: #d4cab0; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 12px; font-weight: 700; letter-spacing: 0.3em; }
+    .header-sub { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.2em; }
+    .tier-num { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 36px; font-weight: 700; letter-spacing: 0.02em; }
+    .tier-num-small { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 22px; font-weight: 700; letter-spacing: 0.02em; }
+    .tier-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.25em; }
+    .tier-desc { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 10px; letter-spacing: 0.1em; }
+    .tier-consequence { fill: #d4cab0; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 10px; letter-spacing: 0.05em; }
+    .divider { stroke: #1a2421; stroke-width: 0.5; }
+    .divider-strong { stroke: #2a3531; stroke-width: 0.5; }
+    .frame-soft { fill: none; stroke: #1a2421; stroke-width: 0.5; }
+
+    @keyframes urgent { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes medium { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes calm { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
+    .pulse-urgent { animation: urgent 1.5s ease-in-out infinite; }
+    .pulse-medium { animation: medium 2.5s ease-in-out infinite; }
+    .pulse-calm { animation: calm 4s ease-in-out infinite; }
+
+    .red-fill { fill: #c4423a; }
+    .amber-fill { fill: #b8956a; }
+    .green-fill { fill: #7a9e7e; }
+    .dim-fill { fill: #5a7a5e; }
+    .gray-fill { fill: #5a6863; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pulse-urgent, .pulse-medium, .pulse-calm { animation: none; }
+    }
+  </style>
+
+  <rect class="bg" width="800" height="500"/>
+
+  <!-- header · simpler, more centered -->
+  <g transform="translate(30, 35)">
+    <text x="0" y="0" class="header-main">DEFCON</text>
+    <text x="0" y="18" class="header-sub">6-TIER SEVERITY LADDER · PER ADR-004</text>
+    <line x1="0" y1="35" x2="740" y2="35" class="divider-strong"/>
+  </g>
+
+  <!-- Each row layout:
+       indicator block: x=0..50
+       tier num: x=80..140
+       tier name + desc: x=160..380
+       consequence: x=420..770
+  -->
+
+  <!-- DEFCON 1 -->
+  <g transform="translate(30, 100)">
+    <rect x="0" y="5" width="50" height="55" class="red-fill pulse-urgent"/>
+    <rect x="0" y="5" width="50" height="55" class="frame-soft" fill="none"/>
+    <text x="80" y="40" class="tier-num red-fill">01</text>
+    <text x="160" y="32" class="tier-name red-fill">DEFCON 1</text>
+    <text x="160" y="50" class="tier-desc">EXISTENTIAL · REGIME-LEVEL</text>
+    <text x="420" y="40" class="tier-consequence">READ ALOUD FIRST</text>
+  </g>
+
+  <line x1="30" y1="165" x2="770" y2="165" class="divider"/>
+
+  <!-- DEFCON 2 -->
+  <g transform="translate(30, 175)">
+    <rect x="0" y="5" width="50" height="55" class="red-fill pulse-urgent" style="animation-delay: 0.3s;"/>
+    <rect x="0" y="5" width="50" height="55" class="frame-soft" fill="none"/>
+    <text x="80" y="40" class="tier-num red-fill">02</text>
+    <text x="160" y="32" class="tier-name red-fill">DEFCON 2</text>
+    <text x="160" y="50" class="tier-desc">CRITICAL · MAJOR INCIDENT</text>
+    <text x="420" y="40" class="tier-consequence">READ ALOUD SECOND</text>
+  </g>
+
+  <line x1="30" y1="240" x2="770" y2="240" class="divider"/>
+
+  <!-- DEFCON 3 -->
+  <g transform="translate(30, 250)">
+    <rect x="0" y="5" width="50" height="55" class="amber-fill pulse-medium"/>
+    <rect x="0" y="5" width="50" height="55" class="frame-soft" fill="none"/>
+    <text x="80" y="40" class="tier-num amber-fill">03</text>
+    <text x="160" y="32" class="tier-name amber-fill">DEFCON 3</text>
+    <text x="160" y="50" class="tier-desc">MATERIAL · REQUIRES ATTENTION</text>
+    <text x="420" y="40" class="tier-consequence">READ ALOUD · CATEGORIZED</text>
+  </g>
+
+  <line x1="30" y1="315" x2="770" y2="315" class="divider"/>
+
+  <!-- DEFCON 4 -->
+  <g transform="translate(30, 325)">
+    <rect x="0" y="5" width="50" height="55" class="green-fill pulse-calm"/>
+    <rect x="0" y="5" width="50" height="55" class="frame-soft" fill="none"/>
+    <text x="80" y="40" class="tier-num green-fill">04</text>
+    <text x="160" y="32" class="tier-name green-fill">DEFCON 4</text>
+    <text x="160" y="50" class="tier-desc">AGENDA · DAILY POLITICAL TRACKING</text>
+    <text x="420" y="40" class="tier-consequence">BULLETED · WITH SOURCES</text>
+  </g>
+
+  <line x1="30" y1="390" x2="770" y2="390" class="divider"/>
+
+  <!-- DEFCON 5 -->
+  <g transform="translate(30, 400)">
+    <rect x="0" y="5" width="50" height="55" class="dim-fill pulse-calm" style="animation-delay: 1s;"/>
+    <rect x="0" y="5" width="50" height="55" class="frame-soft" fill="none"/>
+    <text x="80" y="40" class="tier-num dim-fill">05</text>
+    <text x="160" y="32" class="tier-name dim-fill">DEFCON 5</text>
+    <text x="160" y="50" class="tier-desc">ROUTINE · CULTURE · SPORTS · WEATHER</text>
+    <text x="420" y="40" class="tier-consequence">BULLETED · COMPRESSED</text>
+  </g>
+
+  <line x1="30" y1="465" x2="770" y2="465" class="divider"/>
+
+  <!-- AMBIENT · proper 6th row -->
+  <g transform="translate(30, 475)">
+    <rect x="0" y="-5" width="50" height="20" class="gray-fill" style="opacity: 0.6;"/>
+    <rect x="0" y="-5" width="50" height="20" class="frame-soft" fill="none"/>
+    <text x="80" y="10" class="tier-num-small gray-fill">∅</text>
+    <text x="160" y="2" class="tier-name gray-fill" style="font-size: 11px;">AMBIENT</text>
+    <text x="160" y="14" class="tier-desc" style="font-size: 9px;">BACKGROUND · UNCLASSIFIED</text>
+    <text x="420" y="9" class="tier-consequence">VISUAL ONLY · NO AUDIO</text>
+  </g>
+</svg>

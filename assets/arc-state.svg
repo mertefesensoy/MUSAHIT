@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" role="img" aria-label="MÜŞAHİT arc state machine">
+  <title>MÜŞAHİT arc state machine</title>
+  <desc>How stories persist across days · arcs start OPEN, transition to WATCH after 7 days of inactivity, and become RESOLVED after 30 more days. Active stories that get new clusters stay OPEN indefinitely.</desc>
+
+  <style>
+    .bg { fill: #0a0e0d; }
+    .header-label { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.25em; }
+    .state-name { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.2em; }
+    .state-desc { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.1em; }
+    .state-meta { fill: #d4cab0; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 10px; letter-spacing: 0.05em; }
+    .arrow-label { fill: #b8956a; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 10px; letter-spacing: 0.1em; }
+    .arrow-cond { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 8px; letter-spacing: 0.1em; }
+    .self-loop-label { fill: #7a9e7e; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.1em; }
+    .footer { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.15em; }
+    .divider { stroke: #1a2421; stroke-width: 0.5; }
+    .frame-soft { fill: none; stroke: #1a2421; stroke-width: 0.5; }
+
+    /* state node frames · same surveillance language as logo */
+    .frame-open { fill: none; stroke: #7a9e7e; stroke-width: 1.5; }
+    .frame-watch { fill: none; stroke: #b8956a; stroke-width: 1.5; }
+    .frame-resolved { fill: none; stroke: #5a6863; stroke-width: 1.5; }
+
+    .bracket-open { fill: none; stroke: #7a9e7e; stroke-width: 2; stroke-linecap: square; }
+    .bracket-watch { fill: none; stroke: #b8956a; stroke-width: 2; stroke-linecap: square; }
+    .bracket-resolved { fill: none; stroke: #5a6863; stroke-width: 2; stroke-linecap: square; }
+
+    .label-open { fill: #7a9e7e; }
+    .label-watch { fill: #b8956a; }
+    .label-resolved { fill: #5a6863; }
+
+    /* the transition arrows */
+    .arrow-active { stroke: #b8956a; stroke-width: 1.5; fill: none; }
+    .arrow-decay { stroke: #5a6863; stroke-width: 1.5; fill: none; }
+    .arrow-revive { stroke: #7a9e7e; stroke-width: 1.5; fill: none; stroke-dasharray: 3 3; }
+
+    /* the pulsing "currently live" dot on OPEN */
+    @keyframes live-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
+    .live-dot { animation: live-pulse 1.5s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+
+    /* dashed arrow flow */
+    @keyframes dash-flow { to { stroke-dashoffset: -20; } }
+    .flow-line { animation: dash-flow 2s linear infinite; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .live-dot, .flow-line { animation: none; }
+    }
+  </style>
+
+  <!-- background -->
+  <rect class="bg" width="800" height="340"/>
+
+  <!-- header strip -->
+  <g transform="translate(30, 30)">
+    <text x="0" y="0" class="header-label">ARC LIFECYCLE · MULTI-DAY CONTINUITY</text>
+    <line x1="0" y1="12" x2="740" y2="12" class="divider"/>
+    <text x="740" y="0" text-anchor="end" class="header-label">PER ADR-008</text>
+  </g>
+
+  <!-- arrow marker defs -->
+  <defs>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b8956a"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5a6863"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7a9e7e"/>
+    </marker>
+  </defs>
+
+  <!-- STATE 1 · OPEN · centered around x=170, y=170 -->
+  <g transform="translate(110, 110)">
+    <!-- inner soft frame -->
+    <rect x="10" y="10" width="100" height="100" class="frame-soft"/>
+    <!-- outer surveillance frame -->
+    <rect x="0" y="0" width="120" height="120" class="frame-open"/>
+    <!-- corner brackets -->
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-open"/>
+    <path d="M 112 -5 L 125 -5 L 125 8" class="bracket-open"/>
+    <path d="M -5 112 L -5 125 L 8 125" class="bracket-open"/>
+    <path d="M 112 125 L 125 125 L 125 112" class="bracket-open"/>
+    <!-- state label -->
+    <text x="60" y="50" text-anchor="middle" class="state-name label-open">OPEN</text>
+    <text x="60" y="68" text-anchor="middle" class="state-desc">ACTIVE TODAY</text>
+    <line x1="20" y1="80" x2="100" y2="80" stroke="#2a3531" stroke-width="0.5"/>
+    <!-- the live dot · pulses to show "this is the active state" -->
+    <circle cx="55" cy="95" r="3" fill="#7a9e7e" class="live-dot"/>
+    <text x="65" y="98" class="state-meta">live</text>
+  </g>
+
+  <!-- STATE 2 · WATCH · centered around x=400 -->
+  <g transform="translate(340, 110)">
+    <rect x="10" y="10" width="100" height="100" class="frame-soft"/>
+    <rect x="0" y="0" width="120" height="120" class="frame-watch"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-watch"/>
+    <path d="M 112 -5 L 125 -5 L 125 8" class="bracket-watch"/>
+    <path d="M -5 112 L -5 125 L 8 125" class="bracket-watch"/>
+    <path d="M 112 125 L 125 125 L 125 112" class="bracket-watch"/>
+    <text x="60" y="50" text-anchor="middle" class="state-name label-watch">WATCH</text>
+    <text x="60" y="68" text-anchor="middle" class="state-desc">7-37 DAYS QUIET</text>
+    <line x1="20" y1="80" x2="100" y2="80" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="60" y="98" text-anchor="middle" class="state-meta">archived</text>
+  </g>
+
+  <!-- STATE 3 · RESOLVED · centered around x=630 -->
+  <g transform="translate(570, 110)">
+    <rect x="10" y="10" width="100" height="100" class="frame-soft"/>
+    <rect x="0" y="0" width="120" height="120" class="frame-resolved"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-resolved"/>
+    <path d="M 112 -5 L 125 -5 L 125 8" class="bracket-resolved"/>
+    <path d="M -5 112 L -5 125 L 8 125" class="bracket-resolved"/>
+    <path d="M 112 125 L 125 125 L 125 112" class="bracket-resolved"/>
+    <text x="60" y="50" text-anchor="middle" class="state-name label-resolved">RESOLVED</text>
+    <text x="60" y="68" text-anchor="middle" class="state-desc">37+ DAYS QUIET</text>
+    <line x1="20" y1="80" x2="100" y2="80" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="60" y="98" text-anchor="middle" class="state-meta">cold storage</text>
+  </g>
+
+  <!-- TRANSITION 1 · OPEN → WATCH -->
+  <g>
+    <!-- the arrow line · slightly above center to give label space -->
+    <line x1="240" y1="170" x2="335" y2="170" class="arrow-active" marker-end="url(#arrow-amber)"/>
+    <!-- label above the arrow -->
+    <text x="287" y="160" text-anchor="middle" class="arrow-label">7d quiet</text>
+    <!-- condition below -->
+    <text x="287" y="185" text-anchor="middle" class="arrow-cond">no new clusters</text>
+  </g>
+
+  <!-- TRANSITION 2 · WATCH → RESOLVED -->
+  <g>
+    <line x1="470" y1="170" x2="565" y2="170" class="arrow-decay" marker-end="url(#arrow-gray)"/>
+    <text x="517" y="160" text-anchor="middle" class="arrow-label" style="fill: #5a6863;">30d more</text>
+    <text x="517" y="185" text-anchor="middle" class="arrow-cond">total 37d quiet</text>
+  </g>
+
+  <!-- REVIVAL ARROWS · WATCH → OPEN (story re-emerges) -->
+  <g>
+    <!-- curve from WATCH back to OPEN, going above the boxes -->
+    <path d="M 380 110 Q 290 60 240 110" class="arrow-revive flow-line" marker-end="url(#arrow-green)"/>
+    <text x="310" y="58" text-anchor="middle" class="self-loop-label">new cluster joins</text>
+  </g>
+
+  <!-- self-loop on OPEN · "stays open while active" -->
+  <g>
+    <!-- a small loop above the OPEN box -->
+    <path d="M 145 110 Q 145 75 170 75 Q 195 75 195 110" class="arrow-revive" marker-end="url(#arrow-green)"/>
+    <text x="170" y="70" text-anchor="middle" class="self-loop-label" style="font-size: 8px;">stays open</text>
+  </g>
+
+  <!-- the timeline ribbon at the bottom · visualizes the 37-day decay -->
+  <g transform="translate(30, 270)">
+    <text x="0" y="0" class="header-label" style="font-size: 8px;">DECAY TIMELINE</text>
+    <line x1="0" y1="12" x2="740" y2="12" class="divider"/>
+
+    <!-- the day markers -->
+    <line x1="0" y1="25" x2="740" y2="25" stroke="#1a2421" stroke-width="0.5"/>
+
+    <!-- day 0 marker · OPEN starts -->
+    <line x1="0" y1="22" x2="0" y2="28" stroke="#7a9e7e" stroke-width="1"/>
+    <text x="0" y="42" class="state-meta" style="font-size: 8px; fill: #7a9e7e;">day 0</text>
+
+    <!-- day 7 marker · OPEN → WATCH -->
+    <line x1="140" y1="22" x2="140" y2="28" stroke="#b8956a" stroke-width="1"/>
+    <text x="140" y="42" class="state-meta" style="font-size: 8px; fill: #b8956a;">day 7</text>
+    <text x="140" y="55" class="arrow-cond" text-anchor="middle">→ WATCH</text>
+
+    <!-- day 37 marker · WATCH → RESOLVED -->
+    <line x1="740" y1="22" x2="740" y2="28" stroke="#5a6863" stroke-width="1"/>
+    <text x="740" y="42" class="state-meta" style="font-size: 8px; fill: #5a6863;" text-anchor="end">day 37</text>
+    <text x="740" y="55" class="arrow-cond" text-anchor="end">→ RESOLVED</text>
+
+    <!-- colored segments showing each phase -->
+    <line x1="0" y1="25" x2="140" y2="25" stroke="#7a9e7e" stroke-width="2"/>
+    <line x1="140" y1="25" x2="740" y2="25" stroke="#b8956a" stroke-width="2" opacity="0.5"/>
+  </g>
+</svg>

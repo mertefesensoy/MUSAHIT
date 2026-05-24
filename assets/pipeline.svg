@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 360" role="img" aria-label="MÜŞAHİT pipeline · seven stages">
+  <title>MÜŞAHİT pipeline · seven stages</title>
+  <desc>Seven processing stages arranged left to right · ingest, normalize, cluster, score, arc-link, write, tts · with animated particles showing data flow between them. LLM-using stages are accented in amber, non-LLM stages in green.</desc>
+
+  <style>
+    .bg { fill: #0a0e0d; }
+    .frame-green { fill: none; stroke: #7a9e7e; stroke-width: 1.2; }
+    .frame-amber { fill: none; stroke: #b8956a; stroke-width: 1.2; }
+    .frame-soft { fill: none; stroke: #1a2421; stroke-width: 0.5; }
+    .bracket-green { fill: none; stroke: #7a9e7e; stroke-width: 1.5; stroke-linecap: square; }
+    .bracket-amber { fill: none; stroke: #b8956a; stroke-width: 1.5; stroke-linecap: square; }
+    .stage-name { fill: #d4cab0; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 10px; letter-spacing: 0.1em; font-weight: 700; }
+    .stage-num { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 7px; letter-spacing: 0.15em; }
+    .stage-meta { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 8px; letter-spacing: 0.05em; }
+    .stage-budget { fill: #7a9e7e; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 8px; letter-spacing: 0.05em; }
+    .stage-budget-amber { fill: #b8956a; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 8px; letter-spacing: 0.05em; }
+    .header { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.25em; }
+    .footer { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.15em; }
+    .footer-strong { fill: #7a9e7e; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 9px; letter-spacing: 0.15em; }
+    .timeline { stroke: #2a3531; stroke-width: 0.5; }
+    .timeline-tick { stroke: #5a6863; stroke-width: 0.5; }
+    .flow-line { stroke: #2a3531; stroke-width: 0.5; }
+
+    /* particle flow animations */
+    @keyframes flow-1 { 0% { offset-distance: 0%; opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { offset-distance: 100%; opacity: 0; } }
+    .particle { fill: #7a9e7e; }
+    .particle-amber { fill: #b8956a; }
+
+    .p1a { offset-path: path("M 110 180 L 150 180"); animation: flow-1 1.4s linear infinite; }
+    .p1b { offset-path: path("M 110 180 L 150 180"); animation: flow-1 1.4s linear infinite 0.5s; }
+    .p1c { offset-path: path("M 110 180 L 150 180"); animation: flow-1 1.4s linear infinite 0.9s; }
+
+    .p2a { offset-path: path("M 210 180 L 250 180"); animation: flow-1 1.6s linear infinite 0.2s; }
+    .p2b { offset-path: path("M 210 180 L 250 180"); animation: flow-1 1.6s linear infinite 0.7s; }
+
+    .p3a { offset-path: path("M 310 180 L 350 180"); animation: flow-1 1.2s linear infinite 0.1s; }
+    .p3b { offset-path: path("M 310 180 L 350 180"); animation: flow-1 1.2s linear infinite 0.4s; }
+    .p3c { offset-path: path("M 310 180 L 350 180"); animation: flow-1 1.2s linear infinite 0.7s; }
+
+    /* SCORE is the slow stage · particles trickle out */
+    .p4a { offset-path: path("M 410 180 L 450 180"); animation: flow-1 2.6s linear infinite; }
+    .p4b { offset-path: path("M 410 180 L 450 180"); animation: flow-1 2.6s linear infinite 1.0s; }
+    .p4c { offset-path: path("M 410 180 L 450 180"); animation: flow-1 2.6s linear infinite 1.8s; }
+
+    .p5a { offset-path: path("M 510 180 L 550 180"); animation: flow-1 1.4s linear infinite 0.3s; }
+    .p5b { offset-path: path("M 510 180 L 550 180"); animation: flow-1 1.4s linear infinite 0.8s; }
+
+    .p6a { offset-path: path("M 610 180 L 650 180"); animation: flow-1 1.8s linear infinite 0.2s; }
+    .p6b { offset-path: path("M 610 180 L 650 180"); animation: flow-1 1.8s linear infinite 0.9s; }
+
+    /* exit beam from TTS · the final output */
+    @keyframes exit-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+    .exit-beam { animation: exit-pulse 2s ease-in-out infinite; }
+
+    /* breathing glow on the SCORE stage (the slow one) */
+    @keyframes breathe { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+    .breather { animation: breathe 3s ease-in-out infinite; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .p1a, .p1b, .p1c, .p2a, .p2b, .p3a, .p3b, .p3c,
+      .p4a, .p4b, .p4c, .p5a, .p5b, .p6a, .p6b,
+      .exit-beam, .breather { animation: none; }
+      .particle, .particle-amber { opacity: 0; }
+    }
+  </style>
+
+  <!-- background -->
+  <rect class="bg" width="800" height="360"/>
+
+  <!-- top header strip -->
+  <g transform="translate(30, 30)">
+    <text x="0" y="0" class="header">PIPELINE · NIGHTLY 01:00 TR-LOCAL</text>
+    <line x1="0" y1="12" x2="740" y2="12" class="flow-line"/>
+    <text x="740" y="0" text-anchor="end" class="header">7 STAGES · ≈ 7 MIN ELAPSED</text>
+  </g>
+
+  <!-- the seven stage boxes -->
+  <!-- positions: x = 30, 130, 230, 330, 430, 530, 630 (gaps of 70px → 30px box gap) -->
+  <!-- each box is 80w x 100h, centered at y=130-230 -->
+
+  <!-- stage 1: INGEST · green (non-LLM) -->
+  <g transform="translate(30, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-green"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-green"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-green"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-green"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-green"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">01</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">INGEST</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">37 src</text>
+  </g>
+
+  <!-- stage 2: NORMALIZE · green (non-LLM) -->
+  <g transform="translate(130, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-green"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-green"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-green"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-green"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-green"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">02</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">NORM</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">dedupe</text>
+  </g>
+
+  <!-- stage 3: CLUSTER · amber (LLM/embed) -->
+  <g transform="translate(230, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-amber"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-amber"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-amber"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-amber"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-amber"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">03</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">CLUSTER</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">bge-m3</text>
+  </g>
+
+  <!-- stage 4: SCORE · amber (LLM · the slow one) -->
+  <g transform="translate(330, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft breather"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-amber"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-amber"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-amber"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-amber"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-amber"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">04</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">SCORE</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">qwen2.5</text>
+  </g>
+
+  <!-- stage 5: ARC-LINK · green (non-LLM) -->
+  <g transform="translate(430, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-green"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-green"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-green"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-green"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-green"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">05</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">ARC-LINK</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">multi-day</text>
+  </g>
+
+  <!-- stage 6: WRITE · amber (LLM) -->
+  <g transform="translate(530, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-amber"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-amber"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-amber"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-amber"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-amber"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">06</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">WRITE</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">trendyol</text>
+  </g>
+
+  <!-- stage 7: TTS · green (non-LLM, Piper) -->
+  <g transform="translate(630, 130)">
+    <rect x="10" y="10" width="60" height="80" class="frame-soft"/>
+    <rect x="0" y="0" width="80" height="100" class="frame-green"/>
+    <path d="M -5 8 L -5 -5 L 8 -5" class="bracket-green"/>
+    <path d="M 72 -5 L 85 -5 L 85 8" class="bracket-green"/>
+    <path d="M -5 92 L -5 105 L 8 105" class="bracket-green"/>
+    <path d="M 72 105 L 85 105 L 85 92" class="bracket-green"/>
+    <text x="40" y="32" text-anchor="middle" class="stage-num">07</text>
+    <text x="40" y="55" text-anchor="middle" class="stage-name">TTS</text>
+    <line x1="20" y1="65" x2="60" y2="65" stroke="#2a3531" stroke-width="0.5"/>
+    <text x="40" y="80" text-anchor="middle" class="stage-meta">piper tr</text>
+  </g>
+
+  <!-- flow lines between stages · faint guide lines · particles travel along these -->
+  <line x1="110" y1="180" x2="150" y2="180" class="flow-line"/>
+  <line x1="210" y1="180" x2="250" y2="180" class="flow-line"/>
+  <line x1="310" y1="180" x2="350" y2="180" class="flow-line"/>
+  <line x1="410" y1="180" x2="450" y2="180" class="flow-line"/>
+  <line x1="510" y1="180" x2="550" y2="180" class="flow-line"/>
+  <line x1="610" y1="180" x2="650" y2="180" class="flow-line"/>
+
+  <!-- particles flowing between stages -->
+  <!-- gap 1: INGEST → NORMALIZE -->
+  <circle cx="0" cy="0" r="2" class="particle p1a"/>
+  <circle cx="0" cy="0" r="2" class="particle p1b"/>
+  <circle cx="0" cy="0" r="2" class="particle p1c"/>
+
+  <!-- gap 2: NORMALIZE → CLUSTER -->
+  <circle cx="0" cy="0" r="2" class="particle p2a"/>
+  <circle cx="0" cy="0" r="2" class="particle p2b"/>
+
+  <!-- gap 3: CLUSTER → SCORE -->
+  <circle cx="0" cy="0" r="2" class="particle-amber p3a"/>
+  <circle cx="0" cy="0" r="2" class="particle-amber p3b"/>
+  <circle cx="0" cy="0" r="2" class="particle-amber p3c"/>
+
+  <!-- gap 4: SCORE → ARC-LINK · slower flow · the bottleneck -->
+  <circle cx="0" cy="0" r="2.5" class="particle-amber p4a"/>
+  <circle cx="0" cy="0" r="2.5" class="particle-amber p4b"/>
+  <circle cx="0" cy="0" r="2.5" class="particle-amber p4c"/>
+
+  <!-- gap 5: ARC-LINK → WRITE -->
+  <circle cx="0" cy="0" r="2" class="particle p5a"/>
+  <circle cx="0" cy="0" r="2" class="particle p5b"/>
+
+  <!-- gap 6: WRITE → TTS -->
+  <circle cx="0" cy="0" r="2" class="particle-amber p6a"/>
+  <circle cx="0" cy="0" r="2" class="particle-amber p6b"/>
+
+  <!-- per-stage timing budgets · below the boxes -->
+  <g transform="translate(0, 250)">
+    <text x="70" y="0" text-anchor="middle" class="stage-budget">~ 3 min</text>
+    <text x="170" y="0" text-anchor="middle" class="stage-budget">~ 30 s</text>
+    <text x="270" y="0" text-anchor="middle" class="stage-budget-amber">~ 30 s</text>
+    <text x="370" y="0" text-anchor="middle" class="stage-budget-amber">~ 5 min</text>
+    <text x="470" y="0" text-anchor="middle" class="stage-budget">~ 10 s</text>
+    <text x="570" y="0" text-anchor="middle" class="stage-budget-amber">~ 40 s</text>
+    <text x="670" y="0" text-anchor="middle" class="stage-budget">~ 20 s</text>
+  </g>
+
+  <!-- timeline strip at bottom -->
+  <g transform="translate(30, 290)">
+    <line x1="0" y1="0" x2="740" y2="0" class="timeline"/>
+    <line x1="0" y1="-3" x2="0" y2="3" class="timeline-tick"/>
+    <line x1="370" y1="-3" x2="370" y2="3" class="timeline-tick"/>
+    <line x1="740" y1="-3" x2="740" y2="3" class="timeline-tick"/>
+    <text x="0" y="18" class="footer">01:00</text>
+    <text x="370" y="18" text-anchor="middle" class="footer">≈ 04:30</text>
+    <text x="740" y="18" text-anchor="end" class="footer">07:00 · BRIEFING READY</text>
+  </g>
+
+  <!-- exit beam · the briefing output -->
+  <g transform="translate(710, 175)">
+    <line x1="0" y1="0" x2="60" y2="0" stroke="#7a9e7e" stroke-width="1" class="exit-beam"/>
+    <polygon points="55,-3 62,0 55,3" fill="#7a9e7e" class="exit-beam"/>
+  </g>
+
+  <!-- legend · bottom-left corner -->
+  <g transform="translate(30, 335)">
+    <circle cx="0" cy="0" r="2.5" fill="#7a9e7e"/>
+    <text x="8" y="3" class="footer-strong" style="font-size: 8px;">DETERMINISTIC</text>
+    <circle cx="115" cy="0" r="2.5" fill="#b8956a"/>
+    <text x="123" y="3" class="footer" style="font-size: 8px; fill: #b8956a;">LLM-DRIVEN</text>
+  </g>
+</svg>

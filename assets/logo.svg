@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="MÜŞAHİT logo">
+  <title>MÜŞAHİT</title>
+  <desc>A stylized surveillance viewport with corner brackets containing a chevron eye glyph. The viewport pulses with a slow scan-line animation.</desc>
+
+  <style>
+    .frame { fill: none; stroke: #7a9e7e; stroke-width: 1.5; }
+    .frame-soft { fill: none; stroke: #2a3531; stroke-width: 0.5; }
+    .bracket { fill: none; stroke: #b8956a; stroke-width: 2; stroke-linecap: square; }
+    .eye { fill: #7a9e7e; }
+    .eye-shadow { fill: none; stroke: #7a9e7e; stroke-width: 1; opacity: 0.3; }
+    .dot { fill: #b8956a; }
+    .scan { fill: #7a9e7e; opacity: 0.12; }
+    .label { fill: #5a6863; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 8px; letter-spacing: 0.2em; }
+
+    @keyframes scanline {
+      0% { transform: translateY(0); opacity: 0; }
+      10% { opacity: 0.3; }
+      90% { opacity: 0.3; }
+      100% { transform: translateY(110px); opacity: 0; }
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    @keyframes blink {
+      0%, 95%, 100% { opacity: 1; }
+      97% { opacity: 0.2; }
+    }
+
+    .scanline { animation: scanline 4s ease-in-out infinite; }
+    .pulser { animation: pulse 3s ease-in-out infinite; }
+    .blinker { animation: blink 5s ease-in-out infinite; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .scanline, .pulser, .blinker { animation: none; }
+    }
+  </style>
+
+  <!-- outer faint grid frame -->
+  <rect x="20" y="20" width="160" height="160" class="frame-soft"/>
+
+  <!-- inner viewport rectangle -->
+  <rect x="45" y="45" width="110" height="110" class="frame"/>
+
+  <!-- corner brackets · top-left -->
+  <path d="M 30 50 L 30 30 L 50 30" class="bracket"/>
+  <!-- top-right -->
+  <path d="M 150 30 L 170 30 L 170 50" class="bracket"/>
+  <!-- bottom-left -->
+  <path d="M 30 150 L 30 170 L 50 170" class="bracket"/>
+  <!-- bottom-right -->
+  <path d="M 150 170 L 170 170 L 170 150" class="bracket"/>
+
+  <!-- the scan line · animated -->
+  <rect x="46" y="46" width="108" height="2" class="scan scanline"/>
+
+  <!-- the eye · stylized chevron · the watching glyph -->
+  <g class="pulser">
+    <!-- outer chevron shadow -->
+    <path d="M 75 80 L 100 100 L 75 120" fill="none" stroke="#7a9e7e" stroke-width="1.5" opacity="0.3"/>
+    <!-- inner chevron · the eye -->
+    <path d="M 85 87 L 110 100 L 85 113" fill="none" stroke="#7a9e7e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- the pupil dot -->
+    <circle cx="115" cy="100" r="2.5" class="dot blinker"/>
+  </g>
+
+  <!-- horizontal axis ticks · subtle surveillance UI -->
+  <line x1="55" y1="100" x2="70" y2="100" stroke="#2a3531" stroke-width="0.5"/>
+  <line x1="130" y1="100" x2="145" y2="100" stroke="#2a3531" stroke-width="0.5"/>
+
+  <!-- bottom label · run ID style -->
+  <text x="100" y="195" text-anchor="middle" class="label">M U S A H I T</text>
+</svg>
