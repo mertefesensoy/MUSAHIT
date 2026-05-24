@@ -916,3 +916,70 @@ Operator caveats: the 2026-05-23 briefing on disk is NOT
 regenerated · the audit trail of the smoke-run bug stays intact.
 The next smoke run will produce a briefing at the correct TR-local
 date even when launched after 21:00 UTC.
+
+### Between-step · pipeline_runs lifecycle fix · 2026-05-24
+
+Doc: `docs/implementations/2026-05-24-pipeline-runs-lifecycle-fix.md`
+
+Fixed two compounded bugs the 2026-05-23 → 2026-05-24 smoke surfaced:
+
+1. **Stuck-at-RUNNING.** `pipeline_runs.run_20260524` sat at
+   `status=RUNNING`, `completed_at=NULL` despite the briefing +
+   audio shipping. `Orchestrator._mark_run_completed` lived outside
+   any `finally`, so a SIGINT between `await` points or any
+   unhandled post-success exception aborted the run without
+   writing a terminal status.
+
+2. **Resume re-ran every stage.** Today's
+   `pipeline run --date today` re-set `started_at` and wiped
+   `stages_done` (now `["ingest","normalize","cluster"]` instead
+   of yesterday's full set). When the orchestrator's loop entered
+   the ingest stage, `IngestPoller._upsert_run_start`'s
+   destructive `ON CONFLICT UPDATE` reset the row · the poller is
+   FILE-PROTECTED and the reset is load-bearing for standalone
+   poller invocation (test_poller's rerun-same-runid test), so it
+   couldn't be removed.
+
+Three orchestrator-side defences landed instead of touching the
+protected poller:
+
+- **try/finally** around `run()`'s body guarantees the row reaches
+  a terminal state. The `terminal_set` flag means the finally only
+  writes `FAILED` if neither the normal path nor the
+  `_CatastrophicError` catch already wrote.
+- **Auto-recovery** at run start: if `stages_done` already covers
+  every entry in `STAGE_ORDER` and there's no `--force` /
+  `--stage`, immediately mark COMPLETED and return without
+  executing any stage. Logged at WARNING so the operator
+  investigates the underlying cause rather than relying on
+  masking.
+- **Merge-on-write `_append_stage_done`**: the orchestrator
+  tracks `_stages_view` in memory (initial snapshot + each
+  successful stage) and rewrites the union with the DB's current
+  `stages_done` on every write. A stage that wipes the row (the
+  poller) cannot lose progress · the next `_append_stage_done`
+  restores the full union.
+
+`scripts/reset_stuck_run.py` added for the operator to mark the
+current `run_20260524` row COMPLETED (preserving `stages_done`
+as-is, with a clear warning about missing stages).
+
+Tests · 5 new in `tests/test_orchestrator.py::TestPipelineRunsLifecycle`:
+resume-against-COMPLETED-is-noop, auto-recovery-fires-with-7-stages,
+resume-runs-only-missing-stages, merge-on-write-defeats-the-wipe,
+finally-marks-FAILED-on-uncaught-exception.
+
+Verified: full suite green at **627 passed, 2 skipped** (622
+prior + 5 new), 245s.
+
+Operator caveats:
+- The reset script flips status to COMPLETED but does NOT re-run
+  any missing stages. Re-run the pipeline afterwards if today's
+  briefing/audio is required · with this fix, resume picks up
+  from the first un-done stage.
+- The `finally` guard writes `FAILED`, not `COMPLETED`, when an
+  unhandled exception escapes. If the run had actually completed,
+  the next `pipeline run` will auto-recover.
+- `IngestPoller.run()` called standalone (outside the
+  orchestrator) still wipes the row · that behaviour is
+  intentional and preserved.

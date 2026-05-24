@@ -408,46 +408,64 @@ class Orchestrator:
         if dry_run:
             log.info("dry_run_mode_active")
         else:
-            # DIAGBUG: capture DB state BEFORE _upsert_run_row.
-            pre_row = self._conn.execute(
-                "SELECT run_id, status, started_at, completed_at, "
-                "stages_done, counts, failed_stages FROM pipeline_runs "
-                "WHERE run_id = ?",
-                [run_id],
-            ).fetchone()
-            log.warning("DIAGBUG_pre_upsert", row=repr(pre_row))
             self._upsert_run_row(run_id)
-            post_row = self._conn.execute(
-                "SELECT run_id, status, started_at, completed_at, "
-                "stages_done, counts, failed_stages FROM pipeline_runs "
-                "WHERE run_id = ?",
-                [run_id],
-            ).fetchone()
-            log.warning("DIAGBUG_post_upsert", row=repr(post_row))
 
-        stages_done = self._read_stages_done(run_id) if not dry_run else []
-        log.warning(
-            "DIAGBUG_read_stages_done",
-            stages_done=repr(stages_done),
-            dry_run=dry_run,
-            force=force,
+        # Snapshot stages_done ONCE at start of run · the orchestrator's
+        # in-memory view persists across stages and is rewritten in full
+        # on every _append_stage_done. This defends against the
+        # IngestPoller's destructive _upsert_run_start (which is
+        # load-bearing for standalone poller use, so we work around it
+        # rather than removing it) · even if a stage's internal
+        # bookkeeping wipes the row's stages_done, the orchestrator
+        # restores the union on the next append.
+        initial_stages_done = (
+            self._read_stages_done(run_id) if not dry_run else []
         )
+        stages_done = list(initial_stages_done)
+        self._stages_view = list(initial_stages_done)
         completed: list[str] = []
         failed: list[StageFailure] = []
+        terminal_set = False
 
         try:
+            # Auto-recovery for stuck-at-RUNNING rows. If yesterday's run
+            # completed every stage but the process died before
+            # _mark_run_completed fired (Windows reboot, Ctrl-C between
+            # asyncio await points), the row sits at status=RUNNING with
+            # all 7 stages in stages_done. Today's `pipeline run --date
+            # today` should immediately mark COMPLETED rather than
+            # treat the row as fresh work. Logged at WARNING so the
+            # operator notices and can investigate the underlying cause
+            # rather than relying on this masking the problem.
+            if (
+                not dry_run
+                and only_stage is None
+                and not force
+                and set(STAGE_ORDER).issubset(set(stages_done))
+            ):
+                log.warning(
+                    "pipeline_auto_complete_stuck_running",
+                    stages_done=stages_done,
+                )
+                self._mark_run_completed(
+                    run_id,
+                    status=PipelineStatus.COMPLETED.value,
+                    failed=failed,
+                    dry_run=dry_run,
+                )
+                terminal_set = True
+                return PipelineResult(
+                    run_id=run_id,
+                    status=PipelineStatus.COMPLETED.value,
+                    stages_completed=[],
+                    stages_failed=[],
+                    total_seconds=time.monotonic() - start,
+                )
+
             for stage_name in STAGE_ORDER:
                 if only_stage is not None and stage_name != only_stage:
                     continue
-                will_skip = stage_name in stages_done and not force
-                log.warning(
-                    "DIAGBUG_loop_iter",
-                    stage=stage_name,
-                    in_stages_done=stage_name in stages_done,
-                    force=force,
-                    will_skip=will_skip,
-                )
-                if will_skip:
+                if stage_name in stages_done and not force:
                     log.info("stage_skip_completed", stage=stage_name)
                     continue
 
@@ -467,11 +485,37 @@ class Orchestrator:
                 for model_attr in _models_to_unload_after(stage_name):
                     model_name: str = getattr(self._settings, model_attr)
                     await ollama.unload(model_name)
+
+            # For-loop completed normally · mark the run COMPLETED inside
+            # the try so the finally guard knows the terminal status is
+            # set. Soft per-stage failures still produce status=COMPLETED
+            # per ADR-012 § "the briefing always ships".
+            elapsed = time.monotonic() - start
+            status = PipelineStatus.COMPLETED.value
+            self._mark_run_completed(
+                run_id, status=status, failed=failed, dry_run=dry_run
+            )
+            terminal_set = True
+            log.info(
+                "pipeline_done",
+                status=status,
+                completed=completed,
+                failed=[f.name for f in failed],
+                total_seconds=round(elapsed, 2),
+            )
+            return PipelineResult(
+                run_id=run_id,
+                status=status,
+                stages_completed=completed,
+                stages_failed=failed,
+                total_seconds=elapsed,
+            )
         except _CatastrophicError as exc:
             # KeyboardInterrupt / DiskPressureError / DB corruption ·
             # preserve whatever stages_done we have and re-raise so
             # the CLI exits with the right code.
             self._mark_run_failed(run_id, reason=str(exc), dry_run=dry_run)
+            terminal_set = True
             elapsed = time.monotonic() - start
             log.warning("pipeline_catastrophic_abort", reason=str(exc))
             if isinstance(exc.original, KeyboardInterrupt):
@@ -489,26 +533,20 @@ class Orchestrator:
                 catastrophic_reason=str(exc),
             )
             return result
-
-        elapsed = time.monotonic() - start
-        status = PipelineStatus.COMPLETED.value
-        self._mark_run_completed(
-            run_id, status=status, failed=failed, dry_run=dry_run
-        )
-        log.info(
-            "pipeline_done",
-            status=status,
-            completed=completed,
-            failed=[f.name for f in failed],
-            total_seconds=round(elapsed, 2),
-        )
-        return PipelineResult(
-            run_id=run_id,
-            status=status,
-            stages_completed=completed,
-            stages_failed=failed,
-            total_seconds=elapsed,
-        )
+        finally:
+            # Guarantee a terminal status. If a SIGINT arrives between
+            # await points · or any other unhandled exception escapes
+            # both the for-loop's _CatastrophicError catch and the
+            # normal completion path · _mark_run_completed /
+            # _mark_run_failed would otherwise never fire and the row
+            # would sit at RUNNING forever. The orchestrator owns the
+            # lifecycle, so the orchestrator owns the guarantee.
+            if not dry_run and not terminal_set:
+                self._mark_run_failed(
+                    run_id,
+                    reason="orchestrator_uncaught_exit",
+                    dry_run=dry_run,
+                )
 
     # ── Per-stage runner ───────────────────────────────────────────────
 
@@ -680,21 +718,37 @@ class Orchestrator:
             return []
 
     def _append_stage_done(self, run_id: str, stage_name: str) -> None:
-        """Append ``stage_name`` to ``stages_done`` if absent.
+        """Record ``stage_name`` as complete by merging the orchestrator's
+        in-memory view with whatever the DB currently holds.
 
-        The per-stage orchestrators in earlier build steps already append
-        their own stages_done entries (idempotent INSERT). Doing it again
-        here is intentionally redundant · it guarantees the orchestrator's
-        view of completion stays consistent even if a stage forgets to
-        update the row.
+        The merge defends against stages that internally reset
+        ``stages_done`` (most notably :meth:`IngestPoller._upsert_run_start`,
+        which is load-bearing for standalone poller invocation and so
+        cannot be removed). Without the merge, ingest's wipe would erase
+        any prior stages this run inherited from a previous attempt ·
+        with the merge, the union is rewritten and prior progress
+        survives.
+
+        The in-memory ``_stages_view`` is the source of truth for what
+        this orchestrator instance considers complete; the DB read just
+        catches stages other code wrote that the orchestrator hasn't
+        yet seen.
         """
-        stages = self._read_stages_done(run_id)
-        if stage_name not in stages:
-            stages.append(stage_name)
-            self._conn.execute(
-                "UPDATE pipeline_runs SET stages_done = ? WHERE run_id = ?",
-                [json.dumps(stages), run_id],
-            )
+        view = getattr(self, "_stages_view", None)
+        if view is None:
+            view = []
+            self._stages_view = view
+        if stage_name not in view:
+            view.append(stage_name)
+        db_stages = self._read_stages_done(run_id)
+        merged: list[str] = list(view)
+        for s in db_stages:
+            if s not in merged:
+                merged.append(s)
+        self._conn.execute(
+            "UPDATE pipeline_runs SET stages_done = ? WHERE run_id = ?",
+            [json.dumps(merged), run_id],
+        )
 
     def _append_stage_failure(self, run_id: str, failure: StageFailure) -> None:
         row = self._conn.execute(

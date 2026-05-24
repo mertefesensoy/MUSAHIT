@@ -707,3 +707,276 @@ class TestTargetDatePropagation:
         )
         await orchestrator.run(run_id=RUN_ID)
         assert captured == [None]
+
+
+# ── Regression: pipeline_runs lifecycle (2026-05-24) ───────────────────────
+
+
+class TestPipelineRunsLifecycle:
+    """Three failure modes the 2026-05-24 smoke run surfaced:
+
+    1. The pipeline can leave ``status=RUNNING`` with all 7 stages
+       complete · the process died (Ctrl-C, reboot) between the
+       for-loop and ``_mark_run_completed``. Today's run should
+       recover, not treat the stuck row as fresh work.
+    2. An unhandled exception that escapes both the
+       ``_CatastrophicError`` catch and the normal completion path
+       must still mark a terminal status · the ``finally`` guard.
+    3. A stage that internally wipes ``stages_done`` (the
+       IngestPoller's destructive ``_upsert_run_start``) must not
+       erase prior-stage progress when the orchestrator drives it ·
+       the orchestrator's in-memory view + merge-on-write defends
+       against the wipe without modifying the file-protected poller.
+    """
+
+    async def test_resume_against_completed_row_is_noop(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """A row already in ``COMPLETED`` re-runs nothing and stays
+        ``COMPLETED``. The orchestrator's ``_upsert_run_row`` flips
+        status back to ``RUNNING`` first (that's by design · the
+        operator may be retrying), but with every stage already in
+        ``stages_done`` the auto-recovery path fires and marks
+        ``COMPLETED`` again before any stage executes."""
+        db.execute(
+            "INSERT INTO pipeline_runs (run_id, started_at, completed_at, "
+            "status, stages_done, counts, failed_stages) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                RUN_ID,
+                NOW,
+                datetime(2026, 5, 23, 1, 30, 0),
+                PipelineStatus.COMPLETED.value,
+                json.dumps(list(STAGE_ORDER)),
+                json.dumps({"articles": 200}),
+                json.dumps([]),
+            ],
+        )
+        stages = _all_success_stages()
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(stages),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        result = await orchestrator.run(run_id=RUN_ID)
+
+        assert result.status == PipelineStatus.COMPLETED.value
+        assert result.stages_completed == []
+        for stage in stages.values():
+            assert stage.calls == []
+        row = db.execute(
+            "SELECT status, stages_done FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        assert row[0] == PipelineStatus.COMPLETED.value
+        assert json.loads(row[1]) == list(STAGE_ORDER)
+
+    async def test_resume_auto_recovers_stuck_at_running_with_full_stages(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """The reported 2026-05-24 bug: row stuck at ``RUNNING`` with
+        all 7 stages in ``stages_done``. Today's resume should
+        immediately mark ``COMPLETED`` rather than treat the row as
+        fresh work and re-run every stage."""
+        db.execute(
+            "INSERT INTO pipeline_runs (run_id, started_at, completed_at, "
+            "status, stages_done, counts, failed_stages) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                RUN_ID,
+                NOW,
+                None,  # stuck · no completed_at
+                PipelineStatus.RUNNING.value,
+                json.dumps(list(STAGE_ORDER)),
+                json.dumps({"articles": 200}),
+                json.dumps([]),
+            ],
+        )
+        stages = _all_success_stages()
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(stages),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        result = await orchestrator.run(run_id=RUN_ID)
+
+        assert result.status == PipelineStatus.COMPLETED.value
+        for stage in stages.values():
+            assert stage.calls == []
+        row = db.execute(
+            "SELECT status, completed_at, stages_done "
+            "FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        assert row[0] == PipelineStatus.COMPLETED.value
+        assert row[1] is not None
+        assert json.loads(row[2]) == list(STAGE_ORDER)
+
+    async def test_resume_runs_only_missing_stages(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """Row stuck at ``RUNNING`` with stages 1-3 complete · today's
+        resume runs stages 4-7 only and ends ``COMPLETED``."""
+        db.execute(
+            "INSERT INTO pipeline_runs (run_id, started_at, completed_at, "
+            "status, stages_done, counts, failed_stages) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                RUN_ID,
+                NOW,
+                None,
+                PipelineStatus.RUNNING.value,
+                json.dumps([STAGE_INGEST, STAGE_NORMALIZE, STAGE_CLUSTER]),
+                json.dumps({"articles": 200}),
+                json.dumps([]),
+            ],
+        )
+        stages = _all_success_stages()
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(stages),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        result = await orchestrator.run(run_id=RUN_ID)
+
+        assert result.status == PipelineStatus.COMPLETED.value
+        # Stages 1-3 skipped.
+        assert stages[STAGE_INGEST].calls == []
+        assert stages[STAGE_NORMALIZE].calls == []
+        assert stages[STAGE_CLUSTER].calls == []
+        # Stages 4-7 ran.
+        assert stages[STAGE_SCORE].calls == [RUN_ID]
+        assert stages[STAGE_ARC_LINK].calls == [RUN_ID]
+        assert stages[STAGE_WRITE].calls == [RUN_ID]
+        assert stages[STAGE_TTS].calls == [RUN_ID]
+        # Final stages_done covers all 7.
+        row = db.execute(
+            "SELECT status, stages_done FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        assert row[0] == PipelineStatus.COMPLETED.value
+        assert set(json.loads(row[1])) == set(STAGE_ORDER)
+
+    async def test_finally_marks_failed_when_stage_wipes_stages_done(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """When a stage internally wipes ``stages_done`` (the documented
+        IngestPoller behaviour), the orchestrator's merge-on-write
+        restores prior progress instead of losing it. Simulated here
+        with a fake ingest stage that resets the row inside its
+        ``run()`` body."""
+
+        # Seed: stages 1-3 already done · score, arc_link, write, tts
+        # remain. Without the merge, calling ingest (which wipes
+        # stages_done) would erase normalize and cluster from the row.
+        db.execute(
+            "INSERT INTO pipeline_runs (run_id, started_at, completed_at, "
+            "status, stages_done, counts, failed_stages) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                RUN_ID,
+                NOW,
+                None,
+                PipelineStatus.RUNNING.value,
+                json.dumps([STAGE_NORMALIZE, STAGE_CLUSTER]),  # NO ingest
+                json.dumps({}),
+                json.dumps([]),
+            ],
+        )
+
+        class _IngestWipeStage:
+            """Mimics IngestPoller's destructive _upsert_run_start."""
+
+            def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+                self.name = STAGE_INGEST
+                self._conn = conn
+                self.calls: list[str] = []
+
+            async def run(self, run_id: str) -> dict[str, Any]:
+                self.calls.append(run_id)
+                # Wipe the way the real poller does.
+                self._conn.execute(
+                    "UPDATE pipeline_runs SET stages_done = ?, "
+                    "started_at = ?, completed_at = NULL WHERE run_id = ?",
+                    [json.dumps([]), datetime(2026, 5, 25, 0, 0, 0), run_id],
+                )
+                return {"stage": STAGE_INGEST}
+
+        wipe_stage = _IngestWipeStage(db)
+        stages: dict[str, Any] = _all_success_stages()
+        stages[STAGE_INGEST] = wipe_stage
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(stages),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        result = await orchestrator.run(run_id=RUN_ID)
+
+        assert result.status == PipelineStatus.COMPLETED.value
+        assert wipe_stage.calls == [RUN_ID]
+        # The merge-on-write must rebuild the full union despite the
+        # wipe. Without the merge, normalize + cluster would be gone.
+        row = db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        assert set(json.loads(row[0])) == set(STAGE_ORDER)
+
+    async def test_finally_marks_failed_on_uncaught_exception(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """A non-catastrophic exception that escapes the for-loop body
+        (rare, but happens when a stage's post-success bookkeeping
+        crashes) must still leave the row at a terminal status. The
+        ``finally`` guard writes ``FAILED`` so the row is never
+        stuck-at-RUNNING."""
+
+        # Patch _append_stage_done on a single orchestrator instance to
+        # raise an uncaught exception after the first stage succeeds.
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(_all_success_stages()),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+
+        original = orchestrator._append_stage_done
+        call_count = {"n": 0}
+
+        def _booby_trap(run_id: str, stage_name: str) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 2:  # explode on normalize's bookkeeping
+                raise RuntimeError("simulated bookkeeping failure")
+            original(run_id, stage_name)
+
+        orchestrator._append_stage_done = _booby_trap  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="simulated bookkeeping"):
+            await orchestrator.run(run_id=RUN_ID)
+
+        row = db.execute(
+            "SELECT status, completed_at FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        # Row is no longer stuck at RUNNING.
+        assert row[0] == PipelineStatus.FAILED.value
+        assert row[1] is not None
