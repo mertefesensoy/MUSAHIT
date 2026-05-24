@@ -2,12 +2,12 @@
 
 ADR-009 § TTS scope defines exactly what Piper reads:
 
-1. The header (Tarih, Zirve DEFCON, İşlenen olay) — everything above
+1. The header (Tarih, Zirve DEFCON, İşlenen olay) · everything above
    the first ``## ❯`` section.
-2. ``DEFCON 1-2 · ÖNCELİKLİ`` — full content.
-3. ``DEFCON 3 · MATERYAL`` — one-paragraph summaries only; the
+2. ``DEFCON 1-2 · ÖNCELİKLİ`` · full content.
+3. ``DEFCON 3 · MATERYAL`` · one-paragraph summaries only; the
    ``**Kaynaklar** · …`` attribution lines are visual-only and excluded.
-4. ``AÇIK GELİŞMELER · DEVAM EDEN TAKİP`` — full content.
+4. ``AÇIK GELİŞMELER · DEVAM EDEN TAKİP`` · full content.
 5. A closing line: "DEFCON 4 ve sonrası dashboard'da görüntülenebilir."
 
 Skipped (read on the dashboard, not voiced):
@@ -18,7 +18,7 @@ Skipped (read on the dashboard, not voiced):
 * ``KAPATILAN HİKAYELER``
 * ``SİSTEM LOG``
 
-The parser does not validate template completeness — the writer's
+The parser does not validate template completeness · the writer's
 :func:`musahit.writer.validator.validate_briefing_markdown` already does
 that. The extractor is forgiving: missing voiced sections become empty
 strings rather than errors, so the synthesiser can still produce a
@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-# Marker constants — the exact lines from ADR-009. Kept as literals
+# Marker constants · the exact lines from ADR-009. Kept as literals
 # rather than imported from :mod:`musahit.writer.template` so the TTS
 # stage can be reasoned about independently from the writer.
 
@@ -57,12 +57,22 @@ SKIPPED_MARKERS: tuple[str, ...] = (
     MARKER_SYSTEM_LOG,
 )
 
-# All ## ❯ markers in the template — used to detect any section start
+# All ## ❯ markers in the template · used to detect any section start
 # regardless of voiced/skipped status. The union of VOICED_MARKERS +
 # SKIPPED_MARKERS is exactly the ADR-009 set.
 ALL_MARKERS: tuple[str, ...] = VOICED_MARKERS + SKIPPED_MARKERS
 
 CLOSING_LINE = "DEFCON 4 ve sonrası dashboard'da görüntülenebilir."
+
+# Per the 2026-05-24 ADR-009 amendment, AÇIK GELİŞMELER is split into
+# two subsections · "### Öne Çıkanlar" (top 10 arcs · voiced) and
+# "### Diğer Açık Hikayeler" (remainder · visual only). When the
+# extractor encounters the Diğer marker INSIDE the OPEN_ARCS section
+# it stops bucketing voiced content for that section · the marker line
+# itself is dropped. Briefings produced before this amendment (no
+# Diğer marker) are backward-compatible · the truncation simply never
+# fires and the whole section is voiced as before.
+_DIGER_MARKER = "### Diğer Açık Hikayeler"
 
 # Source-attribution line (visual-only, dropped from DEFCON 3).
 _KAYNAKLAR_RE = re.compile(r"^\*?\*?Kaynaklar\*?\*?\s*·.*$", flags=re.MULTILINE)
@@ -77,7 +87,7 @@ class VoicedBriefing:
     concatenated form for callers that don't need chunk-level control
     (``extract_voiced_sections`` is the goal-spec entry point).
 
-    All fields default to empty strings — a briefing that produced no
+    All fields default to empty strings · a briefing that produced no
     DEFCON 1-2 items, for example, still synthesises a coherent run
     of (header → DEFCON 3 → open arcs → closing) without surfacing the
     absent section as a gap.
@@ -95,7 +105,7 @@ class VoicedBriefing:
     def chunks(self) -> list[str]:
         """Non-empty section chunks in voicing order.
 
-        Empty sections (e.g., no DEFCON 1-2 today) are skipped — Piper
+        Empty sections (e.g., no DEFCON 1-2 today) are skipped · Piper
         would synthesise silence for an empty string which is wasted
         time and produces awkward tick-tick-tick transitions with no
         speech between.
@@ -137,7 +147,7 @@ def extract_voiced_briefing(briefing_md: str) -> VoicedBriefing:
 
 
 def extract_voiced_sections(briefing_md: str) -> str:
-    """Return the joined voiced text — the goal-spec entry point."""
+    """Return the joined voiced text · the goal-spec entry point."""
     return extract_voiced_briefing(briefing_md).joined()
 
 
@@ -147,21 +157,39 @@ def _split_into_sections(briefing_md: str) -> dict[str, str]:
     Lines before the first marker are stored under the synthetic key
     ``"__header__"``. Lines after a marker accumulate under that
     marker until the next ``## ❯`` line is encountered. Section markers
-    themselves are NOT stored in the bucket text — only the body lines
+    themselves are NOT stored in the bucket text · only the body lines
     are kept, so the consumer doesn't end up reading the marker line
     aloud to the operator.
 
     The trailing ``---`` horizontal rule lines between sections are
     kept in the bucket text and stripped by the preprocessor; keeping
     them simplifies bucketing.
+
+    Per the 2026-05-24 ADR-009 amendment, inside MARKER_OPEN_ARCS the
+    bucketing stops once a ``### Diğer Açık Hikayeler`` line is seen
+    · all subsequent lines (up to the next ``## ❯`` marker) are
+    dropped from the voiced text. The Diğer marker line itself is
+    also dropped. Other sections are unaffected.
     """
     buckets: dict[str, list[str]] = {"__header__": []}
     current_key: str = "__header__"
+    inside_open_arcs_overflow: bool = False
     for line in briefing_md.splitlines():
         stripped = line.strip()
         if stripped in ALL_MARKERS:
             current_key = stripped
+            inside_open_arcs_overflow = False
             buckets.setdefault(current_key, [])
+            continue
+        if (
+            current_key == MARKER_OPEN_ARCS
+            and stripped == _DIGER_MARKER
+        ):
+            # Enter overflow mode · this line and every subsequent line
+            # in this section are dropped from the voiced bucket.
+            inside_open_arcs_overflow = True
+            continue
+        if inside_open_arcs_overflow:
             continue
         buckets[current_key].append(line)
     return {k: "\n".join(v) for k, v in buckets.items()}
@@ -170,7 +198,7 @@ def _split_into_sections(briefing_md: str) -> dict[str, str]:
 def _strip_source_lines(text: str) -> str:
     """Remove ``**Kaynaklar** · …`` attribution lines.
 
-    Per ADR-009 § TTS scope, the source list is visual-only — it would
+    Per ADR-009 § TTS scope, the source list is visual-only · it would
     read as a wall of source IDs and band names. The DEFCON 3 section
     keeps the per-item heading, confidence line, summary, but loses the
     source attribution.

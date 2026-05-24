@@ -10,9 +10,9 @@ Invocation form per ADR-007:
     python -m musahit.pipeline resume --date today
 
 Exit codes:
-    0 — pipeline reached COMPLETED status
-    1 — pipeline reached FAILED status (catastrophic abort)
-    2 — operator pressed Ctrl-C / process received SIGINT
+    0 · pipeline reached COMPLETED status
+    1 · pipeline reached FAILED status (catastrophic abort)
+    2 · operator pressed Ctrl-C / process received SIGINT
 
 The CLI's sole job is parsing args, configuring logging, opening the
 DuckDB connection, and instantiating :class:`Orchestrator`. All
@@ -128,6 +128,7 @@ def _cmd_run(
         result = asyncio.run(
             orchestrator.run(
                 run_id=run_id,
+                target_date=target_date,
                 only_stage=args.stage,
                 force=args.force,
                 dry_run=args.dry_run,

@@ -5,6 +5,15 @@
 **Supersedes** · none
 **Cross-references** · ADR-002 · ADR-004 · ADR-005 · ADR-008 · ADR-010
 
+> **Amended** · 2026-05-24 · TTS scope · AÇIK GELİŞMELER capped at top
+> 10 arcs voiced (Öne Çıkanlar subsection); remainder rendered as a
+> visual-only "Diğer Açık Hikayeler" bullet list. Triggered by the
+> 2026-05-23 smoke run: 222 open arcs dumped into the section
+> produced a 64,517-character chunk that exceeded Piper's 60s
+> per-chunk timeout, the whole TTS stage failed, and a 44 KB silent
+> placeholder shipped instead of a real briefing.mp3. See
+> `docs/implementations/2026-05-24-tts-silent-mp3-fix.md`.
+
 ---
 
 ## ❯ Context
@@ -48,8 +57,8 @@ stages parse. An HTML version is rendered from the Markdown for the dashboard.
 
 Olayın iki cümlelik tarafsız özeti. Olgular önce, atıflar arkadan.
 
-> *"Doğrudan alıntı, gerekli ve 15 kelimenin altındaysa."* — KAYNAK·BAND
-> *"Karşı çerçeveleme, farklı banttan."* — KAYNAK·BAND
+> *"Doğrudan alıntı, gerekli ve 15 kelimenin altındaysa."* · KAYNAK·BAND
+> *"Karşı çerçeveleme, farklı banttan."* · KAYNAK·BAND
 
 **Bağlam** · bu olay [arc başlığı] hikayesinin bir parçasıdır · son güncelleme 3 gün önce.
 
@@ -197,13 +206,44 @@ Per ADR-010, the TTS engine reads only:
 - The header (Tarih, Zirve DEFCON, İşlenen olay)
 - DEFCON 1-2 · ÖNCELİKLİ (full items including direct quotes)
 - DEFCON 3 · MATERYAL (one-paragraph summaries, no source lists)
-- AÇIK GELİŞMELER · DEVAM EDEN TAKİP (full)
+- AÇIK GELİŞMELER · DEVAM EDEN TAKİP · **only the `### Öne Çıkanlar`
+  subsection · capped at `VOICED_OPEN_ARCS_CAP = 10` arcs** (2026-05-24)
 - A closing line "DEFCON 4 ve sonrası dashboard'da görüntülenebilir."
 
 DEFCON 4, DİKKAT, AMBİYANS, KAPATILAN HİKAYELER, and SİSTEM LOG are NOT voiced. The
 operator reads them on the dashboard.
 
-Estimated audio length · 4-6 minutes.
+Estimated audio length · 3-4 minutes (post-2026-05-24 · was 4-6).
+
+#### AÇIK GELİŞMELER subsection split (2026-05-24)
+
+The section now has two subsections rendered by both the fallback
+renderer and (when retried) the writer LLM:
+
+* `### Öne Çıkanlar` · the top `VOICED_OPEN_ARCS_CAP = 10` arcs by
+  `(peak_defcon ASC, last_update_at DESC)`. Lower peak_defcon = more
+  severe per ADR-005 / ADR-008. Tie-broken by most-recent update.
+  Each arc rendered with full `### headline · arc_id` block, peak
+  DEFCON, category, and (when present) summary. **This subsection is
+  what the TTS extractor voices.**
+* `### Diğer Açık Hikayeler` · all remaining open arcs as a one-line
+  bullet list `- {headline} · {DEFCON_LABEL_TR} · {category} ·
+  \`{arc_id}\``. **Visual-only · the TTS extractor stops bucketing
+  voiced content once it encounters this marker.**
+
+When the total open arc count is `≤ VOICED_OPEN_ARCS_CAP`, only the
+Öne Çıkanlar subsection is rendered (no Diğer subsection at all).
+This keeps the briefing visually clean on quiet days.
+
+Rationale: the briefing is consumed at 07:00 with coffee · a 3-4
+minute audio is the long edge of what an operator listens to before
+switching context. The smoke run on 2026-05-23 produced a 64K-char
+chunk that Piper timed out on (60s per-chunk budget per ADR-010);
+without the cap, every run scales with the open arc backlog and
+eventually breaks TTS. The cap of 10 is the smallest number that
+still surfaces the operator's full priority queue on heavy days
+(the priority queue is itself bounded by the arc-link stage's
+severity ordering).
 
 ### Dashboard rendering
 

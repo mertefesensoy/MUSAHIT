@@ -5,17 +5,17 @@ The :class:`Orchestrator` is the seam between the per-stage modules
 the operator-facing CLI (:mod:`musahit.pipeline`). It owns three
 responsibilities:
 
-1. **Resumability** — read ``pipeline_runs.stages_done``, skip stages
+1. **Resumability** · read ``pipeline_runs.stages_done``, skip stages
    already completed unless ``--force``. The crash-mid-run path (Windows
    Update reboot, power loss) is handled by re-running ``pipeline
    run --date today``; the orchestrator resumes from the last completed
    stage per ADR-007 § Resumability.
-2. **Failure isolation** — per ADR-012 § Stage 2-5 a single stage's
+2. **Failure isolation** · per ADR-012 § Stage 2-5 a single stage's
    exception is logged + recorded in ``failed_stages`` and the next
    stage runs anyway. The briefing always ships, even when one
    component fails. Only catastrophic conditions (``KeyboardInterrupt``,
    ``DiskPressureError``, DuckDB I/O errors) abort the run.
-3. **Ollama model lifecycle** — the laptop has ~16 GB RAM and only one
+3. **Ollama model lifecycle** · the laptop has ~16 GB RAM and only one
    model fits comfortably with overhead. The orchestrator loads the
    model each stage needs immediately before that stage runs and
    unloads it after the last stage that needs it. Per ADR-001 § Single
@@ -24,13 +24,13 @@ responsibilities:
 
 Dependency injection:
 
-- ``stage_factory`` — a callable ``str -> Stage`` so tests inject
+- ``stage_factory`` · a callable ``str -> Stage`` so tests inject
   fake stages. Defaults to :class:`DefaultStageFactory` which
   constructs the production stages with their real Ollama / Piper
   clients.
-- ``ollama`` — :class:`OllamaModelManager` for load / unload calls.
+- ``ollama`` · :class:`OllamaModelManager` for load / unload calls.
   Defaults to a real httpx-backed manager; tests inject a fake.
-- ``timing_budgets`` — overrideable :data:`STAGE_BUDGETS` so tests
+- ``timing_budgets`` · overrideable :data:`STAGE_BUDGETS` so tests
   use fractional-minute budgets to exercise the timeout path quickly.
 """
 
@@ -44,6 +44,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +89,7 @@ class DiskPressureError(RuntimeError):
     """Raised before stage 1 when free disk falls below the configured floor.
 
     Per ADR-012 § Disk pressure the pipeline aborts immediately rather
-    than start a run that can't possibly finish — the liveness probe
+    than start a run that can't possibly finish · the liveness probe
     surfaces the failure to the operator via a Windows toast.
     """
 
@@ -116,7 +117,7 @@ class PipelineResult:
     ``stages_completed`` is the list of stages that finished without
     exception, in execution order. ``stages_failed`` is the list of
     soft failures (exceptions caught and recorded). A stage can be in
-    ``stages_completed`` from a prior run and re-failed on this run —
+    ``stages_completed`` from a prior run and re-failed on this run ·
     but that doesn't happen in the same run; one run records each
     stage exactly once.
     """
@@ -142,15 +143,25 @@ class DefaultStageFactory:
     moment the stage is about to run. Lazy construction means a Piper
     voice missing on disk fails the tts stage specifically rather than
     blocking the whole pipeline at startup.
+
+    ``get_target_date`` is read at stage-construction time so the
+    Briefer is built with the current run's TR-local target date. The
+    callable indirection (rather than a stored value) keeps the
+    factory reusable across runs · the orchestrator updates its
+    ``_current_target_date`` at the start of each ``run()`` and the
+    factory sees the fresh value.
     """
 
     def __init__(
         self,
         conn: duckdb.DuckDBPyConnection,
         settings: Settings,
+        *,
+        get_target_date: Callable[[], date | None] | None = None,
     ) -> None:
         self._conn = conn
         self._settings = settings
+        self._get_target_date = get_target_date or (lambda: None)
 
     def __call__(self, name: str) -> Stage:
         if name == STAGE_INGEST:
@@ -175,6 +186,7 @@ class DefaultStageFactory:
                 OllamaLlmClient(base_url=self._settings.ollama_base_url),
                 briefings_root=self._settings.briefings_dir,
                 writer_model=self._settings.writer_model,
+                target_date=self._get_target_date(),
             )
         if name == STAGE_TTS:
             return Synthesizer(
@@ -217,7 +229,7 @@ class OllamaModelManager:
     ``keep_alive: 0`` which tells Ollama to evict the model immediately.
 
     Failures (Ollama not running, network blip) are logged at WARN and
-    swallowed — the stage that needs the model will then fail with a
+    swallowed · the stage that needs the model will then fail with a
     more specific error and the orchestrator's per-stage failure
     isolation handles it. The pipeline does not abort if load/unload
     misbehaves.
@@ -326,8 +338,14 @@ class Orchestrator:
     ) -> None:
         self._conn = conn
         self._settings = settings
+        # The TR-local briefing date for the current run. Set by run()
+        # at the start of each invocation; read via the closure passed
+        # to DefaultStageFactory. The closure indirection means a
+        # single orchestrator instance can be re-run with different
+        # dates without the factory caching the wrong value.
+        self._current_target_date: date | None = None
         self._stage_factory: StageFactory = stage_factory or DefaultStageFactory(
-            conn, settings
+            conn, settings, get_target_date=lambda: self._current_target_date
         )
         self._ollama: OllamaModelManager | _NoOpOllamaManager = (
             ollama or OllamaModelManager(base_url=settings.ollama_base_url)
@@ -347,19 +365,34 @@ class Orchestrator:
         self,
         run_id: str | None = None,
         *,
+        target_date: date | None = None,
         only_stage: str | None = None,
         force: bool = False,
         dry_run: bool = False,
     ) -> PipelineResult:
-        """Execute the pipeline. Returns a :class:`PipelineResult`."""
+        """Execute the pipeline. Returns a :class:`PipelineResult`.
+
+        ``target_date`` is the TR-local briefing date. Propagates to
+        the writer stage via :class:`DefaultStageFactory` so the
+        on-disk briefing path matches the CLI's
+        ``--date`` argument even when the pipeline crosses midnight
+        TR-local (where ``started_at`` in UTC would resolve to the
+        previous day). When omitted, the default factory's Briefer
+        falls back to deriving the date from ``started_at`` · this
+        path is the legacy behavior and should only fire for tests
+        that haven't been migrated.
+        """
         from musahit.common.time import tr_local_date
 
         if run_id is None:
             run_id = "run_" + tr_local_date().isoformat().replace("-", "")
+        # Bind for the duration of this run · the factory's closure
+        # reads from here when constructing the Briefer.
+        self._current_target_date = target_date
         log = _log.bind(run_id=run_id)
         start = time.monotonic()
 
-        # Pre-flight checks. Disk pressure is a hard abort — running a
+        # Pre-flight checks. Disk pressure is a hard abort · running a
         # stage that needs disk space when there's none is worse than
         # not running at all.
         self._precheck_disk()
@@ -400,13 +433,13 @@ class Orchestrator:
                 )
                 if ok:
                     completed.append(stage_name)
-                # Unload any model the stage held — even on failure, so
+                # Unload any model the stage held · even on failure, so
                 # the next stage's model loads into a clean memory budget.
                 for model_attr in _models_to_unload_after(stage_name):
                     model_name: str = getattr(self._settings, model_attr)
                     await ollama.unload(model_name)
         except _CatastrophicError as exc:
-            # KeyboardInterrupt / DiskPressureError / DB corruption —
+            # KeyboardInterrupt / DiskPressureError / DB corruption ·
             # preserve whatever stages_done we have and re-raise so
             # the CLI exits with the right code.
             self._mark_run_failed(run_id, reason=str(exc), dry_run=dry_run)
@@ -480,7 +513,7 @@ class Orchestrator:
             stage = stage_factory(stage_name)
         except Exception as exc:
             # Constructor failure (e.g. Piper voice missing) is a soft
-            # stage failure — record + continue.
+            # stage failure · record + continue.
             self._record_stage_failure(
                 run_id=run_id,
                 stage_name=stage_name,
@@ -622,7 +655,7 @@ class Orchestrator:
 
         The per-stage orchestrators in earlier build steps already append
         their own stages_done entries (idempotent INSERT). Doing it again
-        here is intentionally redundant — it guarantees the orchestrator's
+        here is intentionally redundant · it guarantees the orchestrator's
         view of completion stays consistent even if a stage forgets to
         update the row.
         """

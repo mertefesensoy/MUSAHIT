@@ -4,19 +4,20 @@ Per ADR-012 § Stage 6 Writer the writer always produces *something*.
 The LLM is called up to ``max_retries + 1`` times; the first call uses
 the bare prompt, each retry appends the validator's specific errors so
 the model can correct itself. After the final failure we fall through
-to :func:`musahit.writer.fallback.render_fallback_briefing` — the
+to :func:`musahit.writer.fallback.render_fallback_briefing` · the
 operator gets a structurally-valid briefing in any case.
 
 The briefing markdown is written to
 ``briefings/YYYY/MM/DD/briefing.md`` and a ``briefings`` row is
 inserted (or updated) with the day's aggregate counts. Multiple runs
-on the same date overwrite the file and update the row — the briefing
+on the same date overwrite the file and update the row · the briefing
 is per-date, not per-run.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,17 @@ DEFAULT_WRITER_MAX_TOKENS: int = 4096
 
 
 class Briefer:
-    """Compose, validate, and persist the nightly Markdown briefing."""
+    """Compose, validate, and persist the nightly Markdown briefing.
+
+    ``target_date`` (when provided) is the TR-local briefing date that
+    drives :attr:`BriefingPayload.date` and the markdown path
+    (``briefings/YYYY/MM/DD/briefing.md``). When omitted, the writer
+    falls back to deriving the date from ``pipeline_runs.started_at``
+    (UTC) · this is the legacy path and is wrong when the run crosses
+    midnight TR-local. Production callers (orchestrator + CLI) always
+    pass ``target_date``; the fallback exists for backward compat with
+    legacy test fixtures.
+    """
 
     def __init__(
         self,
@@ -48,16 +59,21 @@ class Briefer:
         briefings_root: Path = DEFAULT_BRIEFINGS_ROOT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         writer_model: str | None = None,
+        *,
+        target_date: date | None = None,
     ) -> None:
         self._conn = conn
         self._llm = llm
         self._root = Path(briefings_root)
         self._max_retries = max_retries
         self._writer_model = writer_model
+        self._target_date = target_date
 
     async def run(self, run_id: str) -> dict[str, Any]:
         log = _log.bind(run_id=run_id)
-        payload = build_payload(self._conn, run_id)
+        payload = build_payload(
+            self._conn, run_id, target_date=self._target_date
+        )
 
         markdown, used_fallback = await self._compose(payload, log)
         path = self._write_markdown(payload, markdown)
@@ -112,7 +128,7 @@ class Briefer:
                 errors=errors[:3],
             )
             prompt = self._retry_prompt(base_prompt, errors)
-        # All retries exhausted — fallback.
+        # All retries exhausted · fallback.
         log.warning("writer_fallback", last_errors=last_errors[:3])
         return render_fallback_briefing(payload), True
 

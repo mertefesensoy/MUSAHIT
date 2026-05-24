@@ -1,14 +1,14 @@
 """Integration tests for musahit.tts.synthesizer.Synthesizer.
 
 These tests inject :class:`FakePiper` via the synthesiser's constructor
-so PiperVoice is never loaded. The MP3 encoder is injected too — its
+so PiperVoice is never loaded. The MP3 encoder is injected too · its
 default uses :func:`musahit.tts.encoder.wav_to_mp3` which requires
 ffmpeg in PATH; the test rig substitutes a tiny fake that returns a
 known byte string so the synthesiser orchestration is exercised on
 machines without ffmpeg.
 
 The synthesiser MUST always produce *some* ``briefing.mp3`` per
-ADR-012 § Stage 7 TTS — even when Piper crashes, the briefings table
+ADR-012 § Stage 7 TTS · even when Piper crashes, the briefings table
 is missing data, or the MP3 encoder fails. Each test pins a specific
 failure mode to verify the always-ships invariant.
 """
@@ -153,7 +153,7 @@ def _default_briefing_md() -> str:
 
 
 def _fake_mp3_encoder(wav_bytes: bytes) -> bytes:
-    """Stand-in for ``wav_to_mp3`` — returns a marker byte string."""
+    """Stand-in for ``wav_to_mp3`` · returns a marker byte string."""
     return b"FAKE_MP3:" + wav_bytes[:8]
 
 
@@ -257,7 +257,7 @@ class TestPiperFailure:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The exception path MUST surface the underlying error to
-        stderr — diagnostic visibility for manual / smoke-test runs
+        stderr · diagnostic visibility for manual / smoke-test runs
         where configure_logging() hasn't been called. The structured
         log call still fires; the placeholder MP3 still writes; the
         traceback just adds an extra signal that points at the actual
@@ -369,3 +369,122 @@ class TestSilentPlaceholder:
 
     def test_silent_placeholder_is_deterministic(self) -> None:
         assert silent_placeholder_mp3() == silent_placeholder_mp3()
+
+
+# ── Regression: per-chunk resilience (2026-05-24 silent-MP3 fix) ───────────
+
+
+_SENTINEL_FAIL = "FAIL_THIS_CHUNK_PLEASE"
+
+
+class _SentinelFailingPiper:
+    """Piper stand-in that fails only on chunks containing a sentinel.
+
+    Chunks without the sentinel return a valid silent WAV (same shape
+    as :class:`FakePiper`). Used to exercise the per-chunk try/except
+    added on 2026-05-24 · one bad chunk in the middle of a real
+    briefing must not poison the rest of the synthesis.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.failed_calls: list[int] = []
+        self.succeeded_calls: list[int] = []
+
+    async def synthesize(self, text: str) -> bytes:
+        idx = len(self.calls)
+        self.calls.append(text)
+        if _SENTINEL_FAIL in text:
+            self.failed_calls.append(idx)
+            raise RuntimeError(
+                f"simulated per-chunk failure on chunk {idx} ({_SENTINEL_FAIL})"
+            )
+        self.succeeded_calls.append(idx)
+        # 128 silent samples · enough to concatenate, small to keep tests fast.
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(22050)
+            w.writeframes(b"\x00\x00" * 128)
+        return buf.getvalue()
+
+
+def _briefing_with_failing_chunk() -> str:
+    """Briefing where the AÇIK GELİŞMELER section contains the
+    failure sentinel · the synthesiser should skip that chunk and
+    still produce a real MP3 from the other chunks."""
+    return "\n".join(
+        [
+            "# MÜŞAHİT · GÜNLÜK BRİF",
+            "",
+            "**Tarih** · 24 Mayıs 2026",
+            "**Zirve DEFCON** · 3",
+            "",
+            "---",
+            "",
+            "## ❯ DEFCON 1-2 · ÖNCELİKLİ",
+            "",
+            "### Önemli olay",
+            "Güvenli içerik · sentezlenebilir.",
+            "",
+            "---",
+            "",
+            "## ❯ AÇIK GELİŞMELER · DEVAM EDEN TAKİP",
+            "",
+            f"### Sorunlu arc · {_SENTINEL_FAIL}",
+            f"Bu chunk sentinel içeriyor: {_SENTINEL_FAIL}",
+            "",
+            "---",
+            "",
+            "## ❯ DEFCON 4 · GÜNDEM",
+            "",
+            "- Voiced değil · zaten skipped.",
+        ]
+    )
+
+
+class TestPerChunkResilience:
+    async def test_one_failing_chunk_does_not_fail_whole_stage(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        """One sentinel-bearing chunk skipped · remaining chunks
+        succeed · real MP3 written (no placeholder). This is the
+        regression for the 2026-05-23 silent-MP3 bug · one oversized
+        AÇIK GELİŞMELER chunk used to fail the whole stage."""
+        root = tmp_path / "briefings"
+        _seed_briefing(db, root, body=_briefing_with_failing_chunk())
+
+        piper = _SentinelFailingPiper()
+        synth = Synthesizer(db, piper, root, mp3_encoder=_fake_mp3_encoder)
+        result = await synth.run(RUN_ID)
+
+        assert result["used_placeholder"] is False
+        assert len(piper.failed_calls) == 1
+        assert len(piper.succeeded_calls) >= 2  # at least header + DEFCON 1-2 + closing
+        mp3_path = Path(result["mp3_path"])
+        assert mp3_path.read_bytes().startswith(b"FAKE_MP3:")
+
+    async def test_failing_piper_called_once_per_chunk_before_raising(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        """The per-chunk wrapping must attempt every chunk before
+        giving up · proving the synthesiser does NOT bail on first
+        failure. Combined with the existing
+        ``test_piper_crash_falls_through_to_placeholder`` (which
+        pins the all-fail → placeholder contract), this nails down
+        the per-chunk loop's shape."""
+        root = tmp_path / "briefings"
+        _seed_briefing(db, root)
+
+        piper = FailingPiper()
+        synth = Synthesizer(db, piper, root, mp3_encoder=_fake_mp3_encoder)
+        result = await synth.run(RUN_ID)
+
+        # Placeholder still fires (all chunks failed) · existing
+        # behaviour is preserved.
+        assert result["used_placeholder"] is True
+        # But Piper got every chunk · NOT just the first one. The
+        # default seeded briefing has at least 4 voiced chunks
+        # (header, DEFCON 1-2, DEFCON 3, open arcs, closing).
+        assert piper.call_count >= 4

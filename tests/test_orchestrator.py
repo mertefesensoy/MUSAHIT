@@ -12,7 +12,7 @@ import asyncio
 import json
 import shutil
 from collections.abc import Callable, Generator
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from musahit.common.config import Settings
 from musahit.common.migrations import init_db
 from musahit.common.types import PipelineStatus
 from musahit.orchestrator import (
+    DefaultStageFactory,
     DiskPressureError,
     Orchestrator,
     PipelineResult,
@@ -216,7 +217,7 @@ class TestSoftFailure:
         )
         result = await orchestrator.run(run_id=RUN_ID)
 
-        # Pipeline still reaches COMPLETED — soft failures don't abort.
+        # Pipeline still reaches COMPLETED · soft failures don't abort.
         assert result.status == PipelineStatus.COMPLETED.value
         # Score is missing from completed; everything else is present.
         assert STAGE_SCORE not in result.stages_completed
@@ -546,7 +547,7 @@ class TestKeyboardInterrupt:
         settings: Settings,
     ) -> None:
         stages: dict[str, Any] = _all_success_stages()
-        # Score raises KeyboardInterrupt — catastrophic, re-raised.
+        # Score raises KeyboardInterrupt · catastrophic, re-raised.
         stages[STAGE_SCORE] = _RaisingStage(STAGE_SCORE, KeyboardInterrupt())
         orchestrator = Orchestrator(
             db,
@@ -614,3 +615,95 @@ def test_pipeline_result_default_status_completed() -> None:
 
 def _silence_unused_callable_type() -> Callable[[], None]:  # pragma: no cover
     return lambda: None
+
+
+# ── Regression: target_date propagation (2026-05-24) ───────────────────────
+
+
+class TestTargetDatePropagation:
+    """The 2026-05-23 smoke run shipped the briefing to the wrong
+    on-disk path because the writer derived the date from
+    ``started_at`` (UTC) instead of the CLI's TR-local target. The
+    fix adds ``target_date`` to ``Orchestrator.run`` and threads it
+    through ``DefaultStageFactory`` into ``Briefer`` at construction
+    time. These tests pin the two halves of the new contract."""
+
+    async def test_run_stores_target_date_for_factory_to_read(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """The orchestrator binds ``_current_target_date`` at the
+        start of ``run()`` so the (default or test-supplied) factory
+        can read the per-run value via a closure."""
+        captured: list[date | None] = []
+
+        def _spy_factory(name: str) -> Any:
+            if name == STAGE_WRITE:
+                captured.append(orchestrator._current_target_date)
+            return _SuccessStage(name)
+
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_spy_factory,
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        target = date(2026, 5, 24)
+        result = await orchestrator.run(
+            run_id=RUN_ID, target_date=target
+        )
+        assert result.status == PipelineStatus.COMPLETED.value
+        assert captured == [target]
+
+    def test_default_factory_passes_target_date_to_briefer(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """``DefaultStageFactory`` reads ``get_target_date()`` at
+        each call and constructs ``Briefer`` with the current value.
+        The closure indirection means a single factory instance
+        survives multiple runs with different dates."""
+        from musahit.writer.briefer import Briefer  # local import keeps fixture light
+
+        current: list[date | None] = [date(2026, 5, 24)]
+        factory = DefaultStageFactory(
+            db, settings, get_target_date=lambda: current[0]
+        )
+        stage = factory(STAGE_WRITE)
+        assert isinstance(stage, Briefer)
+        assert stage._target_date == date(2026, 5, 24)
+
+        # Subsequent call with a different "current" value reflects
+        # the new date · no caching.
+        current[0] = date(2026, 5, 25)
+        stage_2 = factory(STAGE_WRITE)
+        assert isinstance(stage_2, Briefer)
+        assert stage_2._target_date == date(2026, 5, 25)
+
+    async def test_omitting_target_date_leaves_current_none(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """When the caller omits ``target_date``, the orchestrator's
+        ``_current_target_date`` stays ``None`` and the default
+        factory's Briefer falls back to the legacy started_at path."""
+        captured: list[date | None] = []
+
+        def _spy_factory(name: str) -> Any:
+            if name == STAGE_WRITE:
+                captured.append(orchestrator._current_target_date)
+            return _SuccessStage(name)
+
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_spy_factory,
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        await orchestrator.run(run_id=RUN_ID)
+        assert captured == [None]

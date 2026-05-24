@@ -741,3 +741,178 @@ Tripwires checked:
 Verified: `ruff check .` clean; `pytest tests/test_writer/ -q` shows
 59 passed (47 prior + 12 new); full suite expected at 600 passed,
 2 skipped (588 prior + 12 new).
+
+### Step 16 follow-up · TTS silent-MP3 fix · 2026-05-24
+
+The 2026-05-23 smoke run shipped a 44 KB silent placeholder MP3
+instead of a real briefing.mp3. Root cause traced through two
+compounding bugs:
+
+(a) The fallback writer's `_render_open_arcs` dumped all 222 open
+arcs into the AÇIK GELİŞMELER section with full `_render_arc`
+blocks · 64,517 characters in one voiced chunk. Piper's 60s
+per-chunk timeout (ADR-010) fired before that chunk finished
+synthesizing.
+
+(b) `Synthesizer._synthesise_chunks` had no per-chunk failure
+isolation · the timeout exception bubbled all the way up through
+the outer `try/except` in `run()`, the entire stage fell to the
+placeholder path, and the real (synthesizable) chunks (header,
+DEFCON 1-2, DEFCON 3, closing) never produced audio.
+
+Two-layer fix (one commit):
+
+(1) **ADR-009 amendment**: AÇIK GELİŞMELER · DEVAM EDEN TAKİP is
+now split into two subsections. `### Öne Çıkanlar` carries the
+top `VOICED_OPEN_ARCS_CAP = 10` arcs (sorted by
+`(peak_defcon ASC, last_update_at DESC)`) as full `_render_arc`
+blocks · this is the voiced subsection. `### Diğer Açık Hikayeler`
+carries any remaining arcs as a one-line bullet list ·
+visual-only, excluded from TTS scope. Target audio length drops
+from 4-6 minutes to 3-4. When total arcs ≤ 10, only Öne Çıkanlar
+renders (no Diğer subsection).
+
+(2) **Per-chunk failure isolation in synthesizer**:
+`_synthesise_chunks` now wraps each `piper.synthesize()` call in
+try/except · per-chunk failures log a `tts_chunk_failed` warning
+(index, chars, error type+message) and the next chunk is still
+attempted. If at least one chunk succeeds the partial WAV list is
+returned and a real MP3 ships. If every chunk fails the function
+raises `ValueError("all chunks failed synthesis") from last_exc`
+so the outer try/except still falls through to the silent
+placeholder path (ADR-012 always-ships invariant). The `from
+last_exc` chaining preserves the original exception in the
+stderr traceback so smoke-run diagnostics remain useful.
+
+Fix scope:
+
+- `ADR-009-briefing-template.md` · added Amended block at top +
+  full subsection-split rationale in the TTS scope section.
+  `VOICED_OPEN_ARCS_CAP = 10` documented.
+- `musahit/writer/fallback.py` · `_render_open_arcs` produces the
+  Öne Çıkanlar / Diğer Açık Hikayeler split with the
+  `(peak_defcon, -timestamp)` sort key. `_arc_sort_key` and
+  `_render_arc_overflow_bullet` helpers. Falls back to
+  `created_at` when `last_update_at` is None (ArcView has no
+  `last_seen_at` field · /goal tripwire cleared with the
+  fallback choice documented here).
+- `musahit/writer/template.py` · AÇIK GELİŞMELER section's
+  `prompt_instruction` rewritten to describe the split (in
+  Turkish) so when Trendyol-LLM eventually produces the briefing
+  it follows the same shape. Empty-state phrase preserved.
+- `musahit/tts/extractor.py` · `_split_into_sections` tracks an
+  `inside_open_arcs_overflow` flag · when current section is
+  MARKER_OPEN_ARCS and we encounter `### Diğer Açık Hikayeler`,
+  we stop appending lines to the voiced bucket for the rest of
+  that section (Diğer marker itself dropped). Backward-compatible
+  with old-shape briefings (no Diğer marker → behavior unchanged).
+- `musahit/tts/synthesizer.py` · `_synthesise_chunks` wraps each
+  call in try/except with per-chunk warning log; raises
+  `ValueError(...) from last_exc` only when EVERY chunk fails.
+- Tests · 6 new in `tests/test_writer/test_fallback.py`
+  (TestOpenArcsSubsectionSplit covering split shape, sort order,
+  None-date safety, overflow bullet format, validator
+  preservation) + 5 new in `tests/test_tts/test_extractor.py`
+  (TestOpenArcsSubsectionTruncation covering highlight kept,
+  Diğer marker dropped, overflow excluded, decoy in other section
+  doesn't truncate, old-shape backward compat) + 2 new in
+  `tests/test_tts/test_synthesizer.py` (TestPerChunkResilience
+  covering one-fail-other-succeed and per-chunk-loop-attempts-all
+  semantics).
+
+Tripwires checked:
+- ArcView field is `last_update_at`, not `last_seen_at` · the
+  /goal's "fall back to created_at" path is honored.
+- ADR-009 amendment touches only the TTS scope subsection (plus
+  the Amended block at the top) · no other sections of ADR-009
+  modified.
+- Current 2026-05-23 briefing.md's AÇIK GELİŞMELER shape
+  (`### {headline} · {arc_id}` blocks, no Diğer marker) matches
+  the legacy code path · extractor's backward compat test pins
+  this so the existing briefing is still parseable.
+- 2026-05-23 briefing.md is NOT being re-rendered · the operator
+  audit trail is preserved (per the "leave bad output as-is for
+  audit" discipline established in 2026-05-24 prior fixes).
+
+Verified: `ruff check .` clean; `pytest tests/test_writer/
+tests/test_tts/ -q` shows 152 passed, 1 skipped (139 prior + 13
+new); full suite expected at 613 passed, 2 skipped (600 prior +
+13 new). Diagnostic against `briefings/2026/05/23/briefing.md`:
+old-shape extractor pulls all 222 arcs (64K chars in AÇIK
+GELİŞMELER chunk · still fails Piper timeout under per-chunk
+resilience because the bad chunk's failure is now isolated and
+the other voiced chunks succeed · placeholder no longer ships).
+The next smoke run produces the new split shape and AÇIK
+GELİŞMELER stays well under 10K chars.
+
+### Step 16 follow-up · date propagation fix · 2026-05-24
+
+The 2026-05-23 smoke run produced its briefing under
+`briefings/2026/05/23/` even though the operator launched the run
+at 00:28 TR-local on 2026-05-24 (= 21:28 UTC on 2026-05-23). The
+run_id was correctly `run_20260524` (CLI → `tr_local_date()`), but
+the writer's `build_payload` derived the briefing date from
+`pipeline_runs.started_at` (UTC stamped by `utcnow()` in the
+orchestrator's `_upsert_run_row`). Two date-resolution paths that
+agreed during the daytime UTC overlap but diverged across the
+21:00-00:00 UTC window when TR is already on the next day.
+
+Fix: make `target_date` a first-class parameter that flows from the
+CLI through the orchestrator into the writer:
+
+- `musahit/writer/payload.py::build_payload` now takes
+  `target_date: date | None = None` (keyword-only). When provided,
+  it directly drives `BriefingPayload.date`. When omitted, the
+  legacy `started_at.date()` fallback fires · kept for backward
+  compat with test fixtures that don't yet pass the kwarg.
+- `musahit/writer/briefer.py::Briefer.__init__` accepts
+  `target_date: date | None = None` (keyword-only). `Briefer.run`
+  passes the stored value to `build_payload`. The Stage Protocol's
+  `run(run_id)` signature stays unchanged · date is bound at
+  construction time, not dispatch time. This avoids changing
+  `stages.py` (tripwire cleared).
+- `musahit/orchestrator.py::Orchestrator.run` accepts
+  `target_date: date | None = None` (keyword-only). Stored on the
+  orchestrator as `self._current_target_date` for the duration of
+  the run. `DefaultStageFactory` is constructed with a closure
+  (`get_target_date=lambda: self._current_target_date`) that the
+  factory reads when building the Briefer · the indirection means
+  a single orchestrator instance can be re-run with different
+  dates without caching the wrong value.
+- `musahit/pipeline.py::_cmd_run` passes the CLI-resolved
+  `target_date` to `orchestrator.run`. CLI already computed it via
+  `_resolve_date(args.date)` / `tr_local_date()`.
+
+TTS synthesizer needs no change: its `_resolve_briefing_date`
+queries `SELECT date FROM briefings ORDER BY generated_at DESC
+LIMIT 1`. After the writer fix that row carries the correct
+target_date, so TTS picks it up automatically (tripwire cleared).
+
+Cluster IDs (`cl_YYYYMMDD_NNNN`) intentionally use the article's
+news date · NOT the briefing date. Per the /goal tripwire, this is
+expected behavior: a cluster about an event from 2026-05-23 should
+keep its `cl_20260523_*` id even when surfaced in the
+2026-05-24 briefing. Cluster ID logic untouched.
+
+Tests · 9 new:
+
+- `tests/test_writer/test_payload.py::TestTargetDatePropagation`
+  (3) · target_date overrides started_at; legacy fallback
+  preserved; midnight-crossing simulation (23:59 UTC → next-TR-day
+  briefing).
+- `tests/test_writer/test_briefer.py::TestTargetDateInBriefer`
+  (3) · target_date drives markdown directory; briefings row date
+  uses target_date; legacy fallback preserved.
+- `tests/test_orchestrator.py::TestTargetDatePropagation`
+  (3) · `Orchestrator.run` stores target_date for factory readback;
+  `DefaultStageFactory` constructs Briefer with current target_date
+  via the closure; omitting target_date leaves it None.
+
+Verified: `ruff check .` clean; `pytest tests/test_writer/
+tests/test_orchestrator.py -q` shows 90 passed (81 prior + 9 new);
+full suite expected at 622 passed, 2 skipped (613 prior + 9 new).
+
+Operator caveats: the 2026-05-23 briefing on disk is NOT
+regenerated · the audit trail of the smoke-run bug stays intact.
+The next smoke run will produce a briefing at the correct TR-local
+date even when launched after 21:00 UTC.

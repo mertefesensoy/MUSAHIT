@@ -9,7 +9,7 @@ alongside the markdown briefing.
 Per ADR-012 § Stage 7 TTS the stage must NEVER abort the pipeline.
 Any failure during synthesis (Piper crash, ffmpeg missing, malformed
 input) is logged and a silent 1-second placeholder MP3 is written
-instead — the dashboard's audio element still loads, just plays
+instead · the dashboard's audio element still loads, just plays
 silence. The operator sees the failure in ``pipeline_runs.counts`` and
 in the briefing's SİSTEM LOG footer.
 
@@ -86,7 +86,7 @@ class Synthesizer:
             chunks = self._preprocessed_chunks(voiced)
             if not chunks:
                 # An entirely empty voiced briefing is itself a soft
-                # failure mode — fall through to the placeholder.
+                # failure mode · fall through to the placeholder.
                 raise ValueError("voiced briefing produced no chunks")
             wavs = await self._synthesise_chunks(chunks, log=log)
             chunks_synthesised = len(chunks)
@@ -138,19 +138,48 @@ class Synthesizer:
     async def _synthesise_chunks(
         self, chunks: list[str], *, log: Any
     ) -> list[bytes]:
-        """Synthesise each chunk via the Piper client. Failures bubble up."""
+        """Synthesise each chunk via Piper · per-chunk failures are skipped.
+
+        Per the 2026-05-24 fix following the smoke-run silent-MP3 bug:
+        one oversized chunk (e.g. an enormous AÇIK GELİŞMELER section)
+        used to fail the whole stage via Piper timeout. Now each chunk
+        is wrapped individually · a single chunk's failure produces a
+        ``tts_chunk_failed`` warning and the next chunk is still tried.
+        If every chunk fails the function raises ``ValueError`` so the
+        outer try/except in :meth:`run` still falls through to the
+        silent placeholder path (ADR-012 always-ships invariant).
+
+        The all-fail ``ValueError`` is raised with ``from last_exc`` so
+        the original exception (e.g. Piper timeout) is preserved in the
+        traceback chain. This keeps the stderr-traceback diagnostic
+        path (see ``test_piper_crash_prints_traceback_to_stderr``)
+        useful for manual / smoke-test runs.
+        """
         out: list[bytes] = []
+        last_exc: Exception | None = None
         for i, chunk in enumerate(chunks):
             log.debug("tts_chunk_start", index=i, chars=len(chunk))
-            wav = await self._piper.synthesize(chunk)
+            try:
+                wav = await self._piper.synthesize(chunk)
+            except Exception as exc:
+                log.warning(
+                    "tts_chunk_failed",
+                    index=i,
+                    chars=len(chunk),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                last_exc = exc
+                continue
             out.append(wav)
+        if not out:
+            raise ValueError("all chunks failed synthesis") from last_exc
         return out
 
     def _interleave_with_ticks(self, wavs: list[bytes]) -> list[bytes]:
         """Place a transition tone between consecutive speech WAVs.
 
         Pattern: [speech_0, tick, speech_1, tick, …, speech_N]. No
-        leading or trailing tick — those would feel like the briefing
+        leading or trailing tick · those would feel like the briefing
         starts and ends with a clipped sound rather than speech.
         """
         if len(wavs) <= 1:
@@ -168,7 +197,7 @@ class Synthesizer:
     def _resolve_briefing_date(self, run_id: str) -> date | None:
         """Find the briefing row associated with this run.
 
-        We use the most recent briefing whose ``markdown_path`` exists —
+        We use the most recent briefing whose ``markdown_path`` exists ·
         the writer just wrote it, and in the nominal case there's
         exactly one row keyed by today's date. If a test or operator
         rerun produced multiple, the most recent one wins.
@@ -218,7 +247,7 @@ class Synthesizer:
             [run_id],
         ).fetchone()
         if row is None:
-            # Unusual but not fatal — the synthesiser ran without a
+            # Unusual but not fatal · the synthesiser ran without a
             # pipeline_runs row. Log silently; the briefing.mp3 is
             # written regardless.
             return
@@ -241,7 +270,7 @@ def silent_placeholder_mp3() -> bytes:
 
     Pure stdlib (``wave``): the bytes are a valid WAV (22050 Hz / 16-bit
     / mono, ~22 050 zero-valued frames). Written into ``briefing.mp3``
-    when synthesis fails — HTML5 ``<audio>`` content-sniffs and plays
+    when synthesis fails · HTML5 ``<audio>`` content-sniffs and plays
     these bytes as a one-second silent track regardless of the file
     extension, satisfying the ADR-012 "briefing always ships"
     discipline without dragging the ffmpeg dependency into the failure

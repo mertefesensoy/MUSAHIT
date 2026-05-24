@@ -4,12 +4,12 @@ Per ADR-012 § Stage 6 Writer, if the writer model produces malformed
 output after ``max_retries``, the pipeline switches to this renderer.
 The output is structurally identical to what the writer is asked to
 produce (same eight sections, same markers, same header) but the prose
-is utilitarian — one-sentence summaries, no cross-band framing
+is utilitarian · one-sentence summaries, no cross-band framing
 discipline, no direct quotes. The operator gets a briefing; it's just
 uglier than the LLM-generated version.
 
 By construction, this renderer's output passes
-:func:`musahit.writer.validator.validate_briefing_markdown` — the
+:func:`musahit.writer.validator.validate_briefing_markdown` · the
 section markers are taken directly from
 :mod:`musahit.writer.template`.
 """
@@ -31,6 +31,16 @@ from musahit.writer.payload import (
 from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
 
 _NO_ITEMS_TR = "Bugün bu bölümde öğe yok."
+
+# AÇIK GELİŞMELER · DEVAM EDEN TAKİP voicing cap. Per the 2026-05-24
+# ADR-009 amendment: the first VOICED_OPEN_ARCS_CAP arcs (ordered by
+# (peak_defcon ASC, last_update_at DESC)) go under "### Öne Çıkanlar"
+# and are voiced by Piper. Any remaining arcs go under "### Diğer Açık
+# Hikayeler" as a visual-only bullet list and are excluded from the
+# TTS scope (see musahit/tts/extractor.py for the matching truncation).
+VOICED_OPEN_ARCS_CAP: int = 10
+_HIGHLIGHT_SUBSECTION_MARKER: str = "### Öne Çıkanlar"
+_OTHER_SUBSECTION_MARKER: str = "### Diğer Açık Hikayeler"
 
 
 def render_fallback_briefing(payload: BriefingPayload) -> str:
@@ -97,9 +107,55 @@ def _render_material(payload: BriefingPayload) -> str:
 
 
 def _render_open_arcs(payload: BriefingPayload) -> str:
+    """Render AÇIK GELİŞMELER with the Öne Çıkanlar / Diğer split.
+
+    The first ``VOICED_OPEN_ARCS_CAP`` arcs (sorted by
+    ``(peak_defcon ASC, last_update_at DESC fallback created_at)``) go
+    under ``### Öne Çıkanlar`` with full ``_render_arc`` blocks · this
+    is the voiced subsection. Any remaining arcs go under
+    ``### Diğer Açık Hikayeler`` as one-line bullets · visual-only,
+    excluded from the TTS scope by ``musahit/tts/extractor.py``. If
+    the total count is ``≤ VOICED_OPEN_ARCS_CAP``, only the highlight
+    subsection is rendered.
+    """
     if not payload.open_arc_updates:
         return _NO_ITEMS_TR
-    return "\n\n".join(_render_arc(a) for a in payload.open_arc_updates)
+
+    ordered = sorted(payload.open_arc_updates, key=_arc_sort_key)
+    highlighted = ordered[:VOICED_OPEN_ARCS_CAP]
+    overflow = ordered[VOICED_OPEN_ARCS_CAP:]
+
+    parts: list[str] = [_HIGHLIGHT_SUBSECTION_MARKER, ""]
+    parts.append("\n\n".join(_render_arc(a) for a in highlighted))
+
+    if overflow:
+        parts.extend(["", _OTHER_SUBSECTION_MARKER, ""])
+        for a in overflow:
+            parts.append(_render_arc_overflow_bullet(a))
+
+    return "\n".join(parts)
+
+
+def _arc_sort_key(arc: ArcView) -> tuple[int, float]:
+    """Severity-then-recency sort key for the open-arcs subsection split.
+
+    Returns ``(peak_defcon, -epoch_seconds)`` so ``sorted(..., key=)``
+    ascending yields most-severe-first, then most-recent-first within
+    each severity tier. Falls back to ``created_at`` when
+    ``last_update_at`` is missing; both missing tiebreaks to epoch 0.0
+    (deterministic, predictable for tests).
+    """
+    dt = arc.last_update_at or arc.created_at
+    epoch = dt.timestamp() if dt is not None else 0.0
+    return (int(arc.peak_defcon), -epoch)
+
+
+def _render_arc_overflow_bullet(arc: ArcView) -> str:
+    """One-line bullet form for ``### Diğer Açık Hikayeler``."""
+    label = DEFCON_LABEL_TR.get(DEFCON(arc.peak_defcon), str(arc.peak_defcon))
+    cat = arc.category or "SINIFLANDIRILMADI"
+    headline = arc.headline or "(başlıksız)"
+    return f"- {headline} · {label} · {cat} · `{arc.id}`"
 
 
 def _render_routine(payload: BriefingPayload) -> str:
@@ -246,4 +302,4 @@ def _format_date(d: date) -> str:
     return f"{d.day} {_MONTHS_TR[d.month - 1]} {d.year}"
 
 
-__all__ = ["render_fallback_briefing"]
+__all__ = ["VOICED_OPEN_ARCS_CAP", "render_fallback_briefing"]

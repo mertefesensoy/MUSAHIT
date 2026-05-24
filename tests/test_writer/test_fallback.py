@@ -1,11 +1,14 @@
-"""Tests for musahit.writer.fallback — the deterministic Python renderer."""
+"""Tests for musahit.writer.fallback · the deterministic Python renderer."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from musahit.score.defcon import DEFCON
-from musahit.writer.fallback import render_fallback_briefing
+from musahit.writer.fallback import (
+    VOICED_OPEN_ARCS_CAP,
+    render_fallback_briefing,
+)
 from musahit.writer.payload import (
     ArcView,
     BriefingPayload,
@@ -182,3 +185,190 @@ class TestSectionPresence:
     def test_no_failed_sources_renders_yok(self) -> None:
         body = render_fallback_briefing(_empty_payload())
         assert "(yok)" in body
+
+
+# ── Regression: AÇIK GELİŞMELER subsection split (2026-05-24) ──────────────
+
+
+def _arc(
+    id_: str,
+    *,
+    peak: int,
+    headline: str,
+    last_update_at: datetime | None = None,
+    created_at: datetime | None = None,
+    category: str = "POLİTİKA",
+) -> ArcView:
+    return ArcView(
+        id=id_,
+        headline=headline,
+        summary="kısa özet",
+        state="OPEN",
+        peak_defcon=peak,
+        category=category,
+        last_update_at=last_update_at,
+        created_at=created_at,
+    )
+
+
+def _payload_with_open_arcs(arcs: list[ArcView]) -> BriefingPayload:
+    return BriefingPayload(
+        date=date(2026, 5, 24),
+        run_id="run_arcs_test",
+        clusters_by_defcon={},
+        open_arc_updates=arcs,
+        resolved_arcs=[],
+        peak_defcon=int(DEFCON.AMBIENT),
+        cluster_count=0,
+        arc_count=len(arcs),
+        open_arc_count=len(arcs),
+        ambient_count=0,
+        failed_sources=[],
+        stages_done=["ingest", "normalize", "cluster", "score", "arc-link"],
+    )
+
+
+def _open_arcs_block(body: str) -> str:
+    start = body.index("## ❯ AÇIK GELİŞMELER · DEVAM EDEN TAKİP")
+    end = body.index("## ❯ DEFCON 4 · GÜNDEM")
+    return body[start:end]
+
+
+class TestOpenArcsSubsectionSplit:
+    def test_eleven_arcs_produce_one_highlight_and_one_overflow(self) -> None:
+        arcs = [
+            _arc(f"arc_a_{i:04d}", peak=int(DEFCON.MATERIAL), headline=f"A{i}")
+            for i in range(11)
+        ]
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        assert "### Öne Çıkanlar" in block
+        assert "### Diğer Açık Hikayeler" in block
+        # Highlight subsection includes 10 full ### blocks (one per
+        # arc) · count is most easily verified by counting overflow
+        # bullets in the Diğer subsection.
+        diger_start = block.index("### Diğer Açık Hikayeler")
+        diger_body = block[diger_start:]
+        overflow_bullets = [
+            line for line in diger_body.splitlines()
+            if line.startswith("- ") and "`arc_a_" in line
+        ]
+        assert len(overflow_bullets) == 1
+
+    def test_ten_arcs_produce_only_highlight_subsection(self) -> None:
+        arcs = [
+            _arc(f"arc_b_{i:04d}", peak=int(DEFCON.MATERIAL), headline=f"B{i}")
+            for i in range(VOICED_OPEN_ARCS_CAP)
+        ]
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        assert "### Öne Çıkanlar" in block
+        assert "### Diğer Açık Hikayeler" not in block
+
+    def test_sort_order_severity_then_recency(self) -> None:
+        # Three SEVERE arcs (most severe = lowest int), two MATERIAL,
+        # two ROUTINE. Within each severity tier, vary last_update_at
+        # so we can pin the order.
+        arcs = [
+            _arc(
+                "arc_rt_old",
+                peak=int(DEFCON.ROUTINE),
+                headline="ROUTINE_OLD",
+                last_update_at=datetime(2026, 5, 20, 12),
+            ),
+            _arc(
+                "arc_sv_old",
+                peak=int(DEFCON.SEVERE),
+                headline="SEVERE_OLD",
+                last_update_at=datetime(2026, 5, 20, 12),
+            ),
+            _arc(
+                "arc_mt_recent",
+                peak=int(DEFCON.MATERIAL),
+                headline="MATERIAL_RECENT",
+                last_update_at=datetime(2026, 5, 24, 9),
+            ),
+            _arc(
+                "arc_sv_recent",
+                peak=int(DEFCON.SEVERE),
+                headline="SEVERE_RECENT",
+                last_update_at=datetime(2026, 5, 24, 9),
+            ),
+        ]
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        # Expected order in Öne Çıkanlar: SEVERE_RECENT, SEVERE_OLD,
+        # MATERIAL_RECENT, ROUTINE_OLD.
+        idx_sr = block.index("SEVERE_RECENT")
+        idx_so = block.index("SEVERE_OLD")
+        idx_mr = block.index("MATERIAL_RECENT")
+        idx_ro = block.index("ROUTINE_OLD")
+        assert idx_sr < idx_so < idx_mr < idx_ro
+
+    def test_arcs_without_last_update_at_do_not_crash_sort(self) -> None:
+        """ArcView.last_update_at can be None · the sort fallback uses
+        created_at, then epoch 0.0 · neither path raises."""
+        arcs = [
+            _arc("arc_no_dates_1", peak=int(DEFCON.MATERIAL), headline="ND1"),
+            _arc(
+                "arc_no_dates_2",
+                peak=int(DEFCON.MATERIAL),
+                headline="ND2",
+                created_at=datetime(2026, 5, 1),
+            ),
+            _arc(
+                "arc_has_dates",
+                peak=int(DEFCON.MATERIAL),
+                headline="HD",
+                last_update_at=datetime(2026, 5, 24),
+            ),
+        ]
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        # All three rendered into the highlight subsection (count is 3
+        # which is below the cap so no Diğer subsection).
+        assert "### Diğer Açık Hikayeler" not in block
+        for h in ("ND1", "ND2", "HD"):
+            assert h in block
+        # The arc with the most-recent last_update_at sorts first.
+        # ND1 has no dates (epoch 0). ND2 has created_at 2026-05-01 only.
+        # HD has last_update_at 2026-05-24. Expected order: HD, ND2, ND1.
+        idx_hd = block.index("HD")
+        idx_nd2 = block.index("ND2")
+        idx_nd1 = block.index("ND1")
+        assert idx_hd < idx_nd2 < idx_nd1
+
+    def test_overflow_bullet_shape_matches_spec(self) -> None:
+        arcs = [
+            _arc(
+                f"arc_pad_{i:04d}",
+                peak=int(DEFCON.MATERIAL),
+                headline=f"pad{i}",
+                last_update_at=datetime(2026, 5, 23, 9),
+            )
+            for i in range(VOICED_OPEN_ARCS_CAP)
+        ]
+        arcs.append(
+            _arc(
+                "arc_overflow_one",
+                peak=int(DEFCON.AMBIENT),
+                headline="Düşük öncelikli arc",
+                last_update_at=datetime(2026, 5, 1),
+                category="TOPLUM",
+            )
+        )
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        # Format: "- {headline} · {DEFCON_LABEL_TR} · {category} · `{arc_id}`"
+        assert (
+            "- Düşük öncelikli arc · AMBİYANS · TOPLUM · `arc_overflow_one`"
+            in block
+        )
+
+    def test_split_briefing_still_passes_validator(self) -> None:
+        arcs = [
+            _arc(f"arc_v_{i:04d}", peak=int(DEFCON.MATERIAL), headline=f"v{i}")
+            for i in range(15)
+        ]
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        assert validate_briefing_markdown(body) == []

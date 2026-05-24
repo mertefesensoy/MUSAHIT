@@ -4,7 +4,7 @@ The writer model gets handed one fully-assembled :class:`BriefingPayload`
 per nightly run. It carries:
 
 * The date and run_id (for the header line + file-system path).
-* Clusters bucketed by final DEFCON (1-2 / 3 / 4 / 5+) — the writer's
+* Clusters bucketed by final DEFCON (1-2 / 3 / 4 / 5+) · the writer's
   primary content.
 * Arcs that received updates today (open_arc_updates).
 * Arcs that transitioned to RESOLVED today.
@@ -13,7 +13,7 @@ per nightly run. It carries:
   footer.
 
 The loader (:func:`build_payload`) reads from the DB via plain SQL.
-The output is a pure-data structure — no DB handles, no callbacks —
+The output is a pure-data structure · no DB handles, no callbacks ·
 which keeps the prompt builder, the fallback renderer, and the writer
 tests all trivially testable against fixture payloads.
 """
@@ -103,8 +103,22 @@ class BriefingPayload:
 def build_payload(
     conn: duckdb.DuckDBPyConnection,
     run_id: str,
+    *,
+    target_date: date | None = None,
 ) -> BriefingPayload:
-    """Read this run's clusters/arcs/log entries and return a payload."""
+    """Read this run's clusters/arcs/log entries and return a payload.
+
+    ``target_date`` is the TR-local briefing date · when provided it
+    directly drives :attr:`BriefingPayload.date` (and therefore the
+    on-disk briefing path). When omitted (legacy callers), the date is
+    derived from ``pipeline_runs.started_at`` which is stored in UTC ·
+    that path produced the 2026-05-23 / 24 mismatch when the run
+    crossed midnight TR-local (00:28 TR = 21:28 UTC). All production
+    callers go through the orchestrator / CLI and pass ``target_date``
+    explicitly; the fallback exists for backward compat with any test
+    fixture that hasn't been migrated. See
+    ``docs/implementations/2026-05-24-date-propagation-fix.md``.
+    """
     run_row = conn.execute(
         "SELECT started_at, stages_done FROM pipeline_runs WHERE run_id = ?",
         [run_id],
@@ -112,7 +126,10 @@ def build_payload(
     if run_row is None:
         raise ValueError(f"No pipeline_runs row for run_id={run_id!r}")
     started_at, stages_json = run_row
-    briefing_date = (started_at or datetime.utcnow()).date()
+    if target_date is not None:
+        briefing_date = target_date
+    else:
+        briefing_date = (started_at or datetime.utcnow()).date()
     stages_done = json.loads(stages_json) if stages_json else []
 
     clusters_by_defcon = _load_clusters(conn, run_id)

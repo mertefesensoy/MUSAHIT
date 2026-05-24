@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -82,7 +82,7 @@ def _seed_one_cluster(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 def _valid_canned_briefing(conn: duckdb.DuckDBPyConnection) -> str:
-    """Build the payload's fallback briefing — guaranteed validator-clean."""
+    """Build the payload's fallback briefing · guaranteed validator-clean."""
     return render_fallback_briefing(build_payload(conn, RUN_ID))
 
 
@@ -264,7 +264,7 @@ class TestPromptInUse:
     ) -> None:
         _seed_one_cluster(db)
         canned = _valid_canned_briefing(db)
-        # Capture the expected prompt BEFORE the briefer runs — once
+        # Capture the expected prompt BEFORE the briefer runs · once
         # it runs, stages_done gains "write" and the prompt would
         # serialise a different stages_done line.
         expected_prompt = build_writer_prompt(build_payload(db, RUN_ID))
@@ -277,3 +277,67 @@ class TestPromptInUse:
 
 def _payload_unused_just_a_check(_: BriefingPayload) -> None:  # pragma: no cover
     """Keep BriefingPayload import live for future test extensions."""
+
+
+# ── Regression: target_date drives markdown path (2026-05-24) ──────────────
+
+
+class TestTargetDateInBriefer:
+    """When ``target_date`` is passed to Briefer, the markdown path
+    uses that date · not the started_at-derived one. Regression for the
+    2026-05-23 smoke run that wrote the next-TR-day briefing into
+    2026/05/23 because started_at was UTC."""
+
+    async def test_target_date_drives_markdown_directory(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_one_cluster(db)
+        canned = _valid_canned_briefing(db)
+        llm = FakeLlmClient(default=canned)
+        # started_at in the fixture is 2026-05-23. We override with
+        # the next day's TR-local date.
+        tr_today = date(2026, 5, 24)
+        result = await Briefer(
+            db,
+            llm,
+            briefings_root=tmp_path / "briefings",
+            target_date=tr_today,
+        ).run(RUN_ID)
+        path = Path(result["path"])
+        assert path.parent.name == "24"
+        assert path.parent.parent.name == "05"
+        assert path.parent.parent.parent.name == "2026"
+
+    async def test_target_date_drives_briefings_row_date(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_one_cluster(db)
+        canned = _valid_canned_briefing(db)
+        tr_today = date(2026, 5, 24)
+        await Briefer(
+            db,
+            FakeLlmClient(default=canned),
+            briefings_root=tmp_path / "briefings",
+            target_date=tr_today,
+        ).run(RUN_ID)
+        row = db.execute(
+            "SELECT date FROM briefings WHERE date = ?", [tr_today]
+        ).fetchone()
+        assert row is not None
+        assert row[0] == tr_today
+
+    async def test_omitting_target_date_falls_back_to_started_at(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        """Legacy behavior preserved · existing tests without
+        target_date still produce the started_at-dated briefing."""
+        _seed_one_cluster(db)
+        canned = _valid_canned_briefing(db)
+        result = await Briefer(
+            db,
+            FakeLlmClient(default=canned),
+            briefings_root=tmp_path / "briefings",
+        ).run(RUN_ID)
+        path = Path(result["path"])
+        # NOW.date() == 2026-05-23 in the fixture.
+        assert path.parent.name == "23"

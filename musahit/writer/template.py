@@ -68,9 +68,16 @@ TEMPLATE_SECTIONS: tuple[TemplateSection, ...] = (
         marker="## ❯ AÇIK GELİŞMELER · DEVAM EDEN TAKİP",
         name="open_arcs",
         prompt_instruction=(
-            "Bugün güncellenen açık arc'ları sırala · her arc için "
-            "### başlık · arc_id · zirve DEFCON · kategori · kısa güncelleme özeti. "
-            "Veri yoksa: \"(bugün güncelleme yok)\"."
+            "Bugün güncellenen açık arc'ları iki alt başlığa böl. "
+            "İlk olarak \"### Öne Çıkanlar\" (en fazla 10 arc · peak_defcon "
+            "küçükten büyüğe sırala, eşitlikte en son güncellenen önce) · "
+            "her arc için \"### başlık · arc_id\" satırı ardından açıldı "
+            "tarihi, zirve DEFCON, kategori ve tek paragraf güncelleme özeti. "
+            "Sonra \"### Diğer Açık Hikayeler\" (kalan arc'lar · tek satırlık "
+            "madde işareti listesi · biçim: \"- başlık · DEFCON · kategori · "
+            "`arc_id`\"). Toplam 10 veya daha az arc varsa yalnızca Öne "
+            "Çıkanlar bölümünü yaz · Diğer Açık Hikayeler bölümü hiç "
+            "olmasın. Veri yoksa: \"(bugün güncelleme yok)\"."
         ),
     ),
     TemplateSection(

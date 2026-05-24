@@ -1,10 +1,10 @@
-"""Tests for musahit.writer.payload — DB → BriefingPayload."""
+"""Tests for musahit.writer.payload · DB → BriefingPayload."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Generator
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -194,3 +194,70 @@ class TestBuildPayload:
         assert payload.open_arc_updates == []
         assert payload.resolved_arcs == []
         assert payload.failed_sources == []
+
+
+# ── Regression: target_date overrides started_at-derived date (2026-05-24) ─
+
+
+class TestTargetDatePropagation:
+    """The 2026-05-23 smoke run wrote the briefing to
+    briefings/2026/05/23/ because ``build_payload`` derived the date
+    from ``pipeline_runs.started_at`` (UTC). The TR-local date the
+    operator asked for was 2026-05-24 (the run started at 00:28 TR =
+    21:28 UTC on the previous day). The ``target_date`` kwarg makes
+    the date a first-class input rather than a derived one."""
+
+    def test_target_date_overrides_utc_started_at(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """When ``target_date`` is passed, it wins over started_at.date()."""
+        tr_today = date(2026, 5, 24)  # TR-local "today"
+        payload = build_payload(db, RUN_ID, target_date=tr_today)
+        assert payload.date == tr_today
+        # The fixture's started_at is 2026-05-23 08:00 UTC · without
+        # target_date the payload would be dated 2026-05-23.
+        assert payload.date != NOW.date()
+
+    def test_no_target_date_falls_back_to_started_at(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Legacy behavior preserved for callers that don't pass it."""
+        payload = build_payload(db, RUN_ID)
+        assert payload.date == NOW.date()
+
+    def test_midnight_crossing_simulation(
+        self, tmp_path: Path
+    ) -> None:
+        """Pipeline runs at 23:59 UTC on day N · target_date is day N+1
+        (TR-local 02:59). Without the fix, the briefing would be dated
+        day N. With the fix, the briefing is dated day N+1."""
+        db_path = tmp_path / "midnight.duckdb"
+        init_db(db_path, load_vss=False)
+        conn = duckdb.connect(str(db_path))
+        try:
+            seed_sources(conn)
+            late_utc = datetime(2026, 5, 23, 23, 59, 0)
+            conn.execute(
+                "INSERT INTO pipeline_runs (run_id, started_at, status, "
+                "stages_done, counts) VALUES (?, ?, ?, ?, ?)",
+                [
+                    "run_late",
+                    late_utc,
+                    "RUNNING",
+                    json.dumps([]),
+                    json.dumps({}),
+                ],
+            )
+            tr_local_target = date(2026, 5, 24)
+
+            with_fix = build_payload(
+                conn, "run_late", target_date=tr_local_target
+            )
+            without_fix = build_payload(conn, "run_late")
+
+            assert with_fix.date == tr_local_target
+            # The legacy path resolves to UTC date · the bug we fixed.
+            assert without_fix.date == late_utc.date()
+            assert with_fix.date != without_fix.date
+        finally:
+            conn.close()
