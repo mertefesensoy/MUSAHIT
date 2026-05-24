@@ -408,9 +408,30 @@ class Orchestrator:
         if dry_run:
             log.info("dry_run_mode_active")
         else:
+            # DIAGBUG: capture DB state BEFORE _upsert_run_row.
+            pre_row = self._conn.execute(
+                "SELECT run_id, status, started_at, completed_at, "
+                "stages_done, counts, failed_stages FROM pipeline_runs "
+                "WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            log.warning("DIAGBUG_pre_upsert", row=repr(pre_row))
             self._upsert_run_row(run_id)
+            post_row = self._conn.execute(
+                "SELECT run_id, status, started_at, completed_at, "
+                "stages_done, counts, failed_stages FROM pipeline_runs "
+                "WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            log.warning("DIAGBUG_post_upsert", row=repr(post_row))
 
         stages_done = self._read_stages_done(run_id) if not dry_run else []
+        log.warning(
+            "DIAGBUG_read_stages_done",
+            stages_done=repr(stages_done),
+            dry_run=dry_run,
+            force=force,
+        )
         completed: list[str] = []
         failed: list[StageFailure] = []
 
@@ -418,7 +439,15 @@ class Orchestrator:
             for stage_name in STAGE_ORDER:
                 if only_stage is not None and stage_name != only_stage:
                     continue
-                if stage_name in stages_done and not force:
+                will_skip = stage_name in stages_done and not force
+                log.warning(
+                    "DIAGBUG_loop_iter",
+                    stage=stage_name,
+                    in_stages_done=stage_name in stages_done,
+                    force=force,
+                    will_skip=will_skip,
+                )
+                if will_skip:
                     log.info("stage_skip_completed", stage=stage_name)
                     continue
 
