@@ -219,7 +219,20 @@ class ArcLinker:
         return cache
 
     def _select_pending(self, run_id: str) -> list[_ClusterRow]:
-        """Scored clusters in this run that lack ``arc_id``, severity-ordered."""
+        """Scored clusters in this run that lack ``arc_id``, severity-ordered.
+
+        The empty-headline filter (added 2026-05-25 per
+        ``docs/investigations/2026-05-25-empty-headlines.md`` Option A)
+        excludes clusters where ``c.headline`` is NULL or whitespace-only.
+        Such clusters are almost always score-stage fallback rows from a
+        worker-LLM failure: previously they would seed arcs whose
+        ``headline``/``summary`` were ``""`` and surface as ``(başlıksız)``
+        placeholders in the briefing. With the matching 2026-05-25
+        classifier change, fresh fallbacks now carry a recognisable
+        placeholder (``"(sınıflandırılamadı)"``) and pass the filter; this
+        guard exists as defence-in-depth against any future code path
+        that lands an empty headline on a cluster row.
+        """
         cursor = self._conn.execute(
             """
             SELECT c.id, c.final_defcon, c.headline, c.summary, c.category,
@@ -231,6 +244,7 @@ class ArcLinker:
               JOIN ingest_log l ON l.source_id = a.source_id AND l.run_id = ?
              WHERE c.arc_id IS NULL
                AND c.final_defcon IS NOT NULL
+               AND coalesce(trim(c.headline), '') != ''
              GROUP BY c.id, c.final_defcon, c.headline, c.summary, c.category,
                       c.created_at, ce.centroid
              ORDER BY c.final_defcon ASC

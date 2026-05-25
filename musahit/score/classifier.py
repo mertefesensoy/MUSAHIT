@@ -360,14 +360,37 @@ class Classifier:
 
 
 # ── Final fallback response ────────────────────────────────────────────────
-
+#
+# Operator-visible placeholder strings · 2026-05-25 fix for the empty-
+# headline arc bug (see docs/investigations/2026-05-25-empty-headlines.md).
+# Before this change the headline/summary were literal empty strings; the
+# arc-link stage then seeded arcs whose headline + summary were "" and
+# the fallback renderer substituted "(başlıksız)" / dropped the body
+# entirely, leaking a content-free arc into the voiced briefing.
+#
+# With non-empty placeholders the operator HEARS a recognisable Turkish
+# signal ("sınıflandırılamadı" = "could not be classified") rather than
+# the generic "başlıksız" ("untitled") · plus the arc-link's new
+# empty-headline filter (linker._select_pending) treats these as
+# legitimate non-empty seeds, which is acceptable because the placeholder
+# itself flags the situation for operator triage.
+#
+# ``confidence_self`` is structurally required by :class:`WorkerResponse`
+# (no default · ``Literal["high","medium","low"]``) but is NOT consumed
+# by :meth:`Classifier._persist` · the persisted ``confidence`` column
+# is recomputed deterministically from band count via
+# :func:`promotion.confidence`. The literal "low" here is correct in
+# spirit (the worker failed) but has no behavioural effect.
 _FALLBACK_RESPONSE: WorkerResponse = WorkerResponse(
     defcon=int(DEFCON.AMBIENT),
     category=Category.UNCLASSIFIED,
     confidence_self="low",
     entities=[],
-    summary="",
-    headline="",
+    headline="(sınıflandırılamadı)",
+    summary=(
+        "Skorlama modeli bu kümede geçerli yanıt üretemedi. "
+        "Operatör incelemesi bekliyor."
+    ),
 )
 
 

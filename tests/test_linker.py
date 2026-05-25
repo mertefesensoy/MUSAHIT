@@ -768,3 +768,149 @@ def _vector_helper_smoke() -> None:
     """Sanity guard that _norm_vec stays a no-op for unit vectors."""
     v = _unit(0)
     assert _norm_vec(v) == v
+
+
+# ── TestSelectPendingExcludesEmptyHeadlineClusters ─────────────────────────
+#
+# Per docs/investigations/2026-05-25-empty-headlines.md Option A · the
+# arc-link stage's ``_select_pending`` SQL now skips clusters whose
+# ``headline`` is NULL or trims to empty. This is defence-in-depth against
+# any future code path that lands an empty-headline cluster (the matching
+# Option B fix in the classifier ensures fresh fallback rows carry a
+# placeholder · this filter catches any historical or future leak).
+
+
+class TestSelectPendingExcludesEmptyHeadlineClusters:
+    async def test_empty_string_headline_does_not_seed_arc(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Cluster with explicit empty-string headline · would have seeded
+        # an arc under the pre-2026-05-25 SQL. Now it is silently skipped.
+        _insert_article(
+            db,
+            article_id="ehl_art",
+            source_id="bianet",
+            entities=["İmamoğlu", "İstanbul"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_empty_headline",
+            final_defcon=int(DEFCON.MATERIAL),
+            centroid=_unit(8),
+            article_ids=["ehl_art"],
+            headline="",  # empty string
+            summary="any summary",
+        )
+        # The helper writes the headline as " or f'H-{cluster_id}'" · we
+        # need to actually overwrite it to empty.
+        db.execute(
+            "UPDATE clusters SET headline = '' WHERE id = 'cl_empty_headline'"
+        )
+
+        result = await ArcLinker(db).run(RUN_ID)
+
+        # Nothing happened · the empty-headline cluster was filtered out.
+        assert result["seeded"] == 0
+        assert result["joined"] == 0
+        # The cluster row is still there with arc_id IS NULL.
+        row = db.execute(
+            "SELECT arc_id FROM clusters WHERE id = 'cl_empty_headline'"
+        ).fetchone()
+        assert row[0] is None
+        # No arc was created.
+        arc_count = db.execute("SELECT COUNT(*) FROM arcs").fetchone()[0]
+        assert arc_count == 0
+
+    async def test_spaces_only_headline_does_not_seed_arc(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Spaces-only headline · trims to empty under DuckDB's default
+        # ``trim()`` (which strips spaces only · not tabs/newlines).
+        # The filter pinned in linker._select_pending matches that
+        # default; the goal authorises the specific SQL shape.
+        _insert_article(
+            db,
+            article_id="ws_art",
+            source_id="bianet",
+            entities=["Erdoğan"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_spaces_only",
+            final_defcon=int(DEFCON.MATERIAL),
+            centroid=_unit(9),
+            article_ids=["ws_art"],
+        )
+        db.execute(
+            "UPDATE clusters SET headline = '     ' WHERE id = 'cl_spaces_only'"
+        )
+
+        result = await ArcLinker(db).run(RUN_ID)
+        assert result["seeded"] == 0
+        assert (
+            db.execute(
+                "SELECT arc_id FROM clusters WHERE id = 'cl_spaces_only'"
+            ).fetchone()[0]
+            is None
+        )
+
+    async def test_non_empty_headline_still_seeds_arc(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Sanity guard: the new filter doesn't accidentally exclude
+        # real clusters. A cluster with a real headline still seeds
+        # an arc as before. Mirrors TestNoMatchSeedsArc but added here
+        # so the regression for the new filter is self-contained.
+        _insert_article(
+            db,
+            article_id="ok_art",
+            source_id="diken",
+            entities=["AYM", "Kararı"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_real_headline",
+            final_defcon=int(DEFCON.SEVERE),
+            centroid=_unit(11),
+            article_ids=["ok_art"],
+            headline="AYM kararı açıklandı",
+            summary="Anayasa Mahkemesi karar verdi.",
+        )
+
+        result = await ArcLinker(db).run(RUN_ID)
+        assert result["seeded"] == 1
+        assert db.execute("SELECT COUNT(*) FROM arcs").fetchone()[0] == 1
+
+    async def test_placeholder_headline_passes_the_filter(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """The classifier's Option B placeholder is non-empty after
+        ``trim`` so it passes the filter · pinned here so the two fixes
+        stay coupled."""
+        _insert_article(
+            db,
+            article_id="ph_art",
+            source_id="bianet",
+            entities=["Konu", "Olay"],
+        )
+        _insert_cluster(
+            db,
+            cluster_id="cl_placeholder",
+            final_defcon=int(DEFCON.AMBIENT),
+            centroid=_unit(12),
+            article_ids=["ph_art"],
+            headline="(sınıflandırılamadı)",
+            summary=(
+                "Skorlama modeli bu kümede geçerli yanıt üretemedi. "
+                "Operatör incelemesi bekliyor."
+            ),
+        )
+
+        result = await ArcLinker(db).run(RUN_ID)
+        assert result["seeded"] == 1
+        # The arc carries the placeholder text directly, NOT an empty
+        # value — operator can recognise it in the briefing.
+        arc_row = db.execute(
+            "SELECT headline FROM arcs"
+        ).fetchone()
+        assert arc_row[0] == "(sınıflandırılamadı)"

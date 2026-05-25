@@ -372,3 +372,107 @@ class TestOpenArcsSubsectionSplit:
         ]
         body = render_fallback_briefing(_payload_with_open_arcs(arcs))
         assert validate_briefing_markdown(body) == []
+
+
+# ── Regression: empty-headline placeholder rendering (2026-05-25) ──────────
+
+
+class TestPlaceholderHeadlineRendering:
+    """Per docs/investigations/2026-05-25-empty-headlines.md · the
+    classifier's Option B fix writes a non-empty placeholder when the
+    worker LLM fails, so the renderer sees a real headline and does NOT
+    substitute ``(başlıksız)``. Pinned here so the two fixes stay coupled.
+    """
+
+    PLACEHOLDER_HEADLINE = "(sınıflandırılamadı)"
+    PLACEHOLDER_SUMMARY = (
+        "Skorlama modeli bu kümede geçerli yanıt üretemedi. "
+        "Operatör incelemesi bekliyor."
+    )
+
+    def _placeholder_arc(self) -> ArcView:
+        return ArcView(
+            id="arc_placeholder_test",
+            headline=self.PLACEHOLDER_HEADLINE,
+            summary=self.PLACEHOLDER_SUMMARY,
+            state="OPEN",
+            peak_defcon=int(DEFCON.AMBIENT),
+            category="SINIFLANDIRILMADI",
+            last_update_at=datetime(2026, 5, 25, 8, 0),
+            created_at=datetime(2026, 5, 25, 8, 0),
+            last_update_headline=self.PLACEHOLDER_HEADLINE,
+            last_update_summary=self.PLACEHOLDER_SUMMARY,
+            last_update_cluster_id="cl_placeholder",
+            is_active_today=True,
+            days_since_last_update=0,
+        )
+
+    def test_placeholder_arc_renders_without_baslıksız(self) -> None:
+        body = render_fallback_briefing(
+            _payload_with_open_arcs([self._placeholder_arc()])
+        )
+        block = _open_arcs_block(body)
+        # The renderer's "or '(başlıksız)'" substitution does NOT fire
+        # because the headline is non-empty · only "(sınıflandırılamadı)"
+        # appears in the arc block.
+        assert "(başlıksız)" not in block
+        assert self.PLACEHOLDER_HEADLINE in block
+
+    def test_placeholder_summary_renders_as_guncelleme_body(self) -> None:
+        body = render_fallback_briefing(
+            _payload_with_open_arcs([self._placeholder_arc()])
+        )
+        # Active-today rendering uses the **Güncelleme** prefix for the
+        # body; the placeholder summary appears under it.
+        assert "**Güncelleme**" in body
+        assert "Skorlama modeli" in body
+
+    def test_overflow_bullet_form_renders_placeholder_text(self) -> None:
+        """Stalled arcs land in the bulleted overflow as
+        ``- {headline} · {DEFCON} · {category} · `{id}``` · the
+        placeholder headline must appear in that bullet (no
+        ``(başlıksız)`` substitution)."""
+        # Force overflow by pushing more than 10 active-today arcs.
+        arcs = [
+            ArcView(
+                id=f"arc_pad_{i:04d}",
+                headline=f"Real arc {i}",
+                summary="kısa özet",
+                state="OPEN",
+                peak_defcon=int(DEFCON.MATERIAL),
+                category="POLİTİKA",
+                last_update_at=datetime(2026, 5, 25, 9),
+                created_at=datetime(2026, 5, 25, 9),
+                is_active_today=True,
+            )
+            for i in range(VOICED_OPEN_ARCS_CAP)
+        ]
+        # Stalled placeholder arc · sorts to overflow under the new key
+        # `(active_tier, peak, -epoch)` because is_active_today=False.
+        stalled_placeholder = ArcView(
+            id="arc_stalled_placeholder",
+            headline=self.PLACEHOLDER_HEADLINE,
+            summary=self.PLACEHOLDER_SUMMARY,
+            state="OPEN",
+            peak_defcon=int(DEFCON.AMBIENT),
+            category="SINIFLANDIRILMADI",
+            last_update_at=datetime(2026, 5, 23),
+            created_at=datetime(2026, 5, 23),
+            is_active_today=False,
+            days_since_last_update=2,
+        )
+        arcs.append(stalled_placeholder)
+        body = render_fallback_briefing(_payload_with_open_arcs(arcs))
+        block = _open_arcs_block(body)
+        diger_start = block.index("### Diğer Açık Hikayeler")
+        diger_body = block[diger_start:]
+        assert (
+            "- (sınıflandırılamadı) · AMBİYANS · SINIFLANDIRILMADI "
+            "· `arc_stalled_placeholder`"
+        ) in diger_body
+        # And NOT the generic placeholder.
+        generic_bullet = (
+            "(başlıksız) · AMBİYANS · SINIFLANDIRILMADI "
+            "· `arc_stalled_placeholder`"
+        )
+        assert generic_bullet not in diger_body

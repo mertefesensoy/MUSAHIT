@@ -1226,3 +1226,108 @@ Operator caveats:
   operator override is the authorization. If the registry-bands
   ADR (ADR-003) ever gets a comprehensive update, the danistay
   history will be reflected then.
+
+### Between-step · empty-headline arc fix (Option A + B + cleanup) · 2026-05-25
+
+Investigation: `docs/investigations/2026-05-25-empty-headlines.md`
+Doc: `docs/implementations/2026-05-25-empty-headline-fix.md`
+
+Two arcs (`arc_20260523_0146`, `arc_20260523_0036`) were rendering
+with the `(başlıksız)` placeholder · 0146 was promoted into voiced
+*Öne Çıkanlar* by the new active-today sort tier (a second cluster
+joined it on 2026-05-25). The investigation traced the symptom to
+the score-stage fallback path: when the worker LLM fails after
+`max_retries`, `Classifier._FALLBACK_RESPONSE` previously wrote
+`headline=""` / `summary=""` which propagated unguarded through
+`_seed_arc` into the arcs table.
+
+Three changes:
+
+1. **Option B (score-stage placeholder)** · `_FALLBACK_RESPONSE`
+   now writes `headline = "(sınıflandırılamadı)"` and
+   `summary = "Skorlama modeli bu kümede geçerli yanıt üretemedi.
+   Operatör incelemesi bekliyor."`. The operator hears (and sees)
+   a recognisable Turkish "could not be classified" signal rather
+   than the generic "başlıksız". `confidence_self="low"` retained
+   with explanatory comment (structurally required by the pydantic
+   schema; not consumed by `_persist`).
+
+2. **Option A (arc-link defence-in-depth)** · `_select_pending`
+   SQL adds `AND coalesce(trim(c.headline), '') != ''`. Clusters
+   with NULL or spaces-only headline never become arc seeds.
+   linker.py is FILE-PROTECTED; the /goal authorises this scoped
+   one-line WHERE-clause addition. DuckDB's default `trim()`
+   strips spaces only (not tabs/newlines); the filter matches the
+   historically-observed shape. The matching Option B placeholder
+   text passes the predicate trivially.
+
+3. **One-off repair script** · `scripts/maintenance/
+   repair_2026_05_25_empty_arcs.py`:
+   - `arc_20260523_0146` is recovered from `cl_20260525_0076`'s
+     real Bilgi Üniversitesi headline + summary (the cluster
+     joined this arc on 2026-05-25 with non-empty scored content).
+   - `arc_20260523_0036` gets the same placeholder text the
+     classifier fallback now writes (its only cluster
+     `cl_20260523_0011` also has empty content · unrecoverable).
+   - Idempotent (skips writes when state matches desired).
+   - Touches ONLY `headline`, `summary`, `last_update_headline`,
+     `last_update_summary` · `last_update_at` and
+     `last_update_cluster_id` stay put (tripwire guard with a
+     post-condition log).
+   - Uses the DuckDB FK workaround from `_update_arc` inline
+     (no helper reuse · script must be self-contained).
+   - Operator-run · `--dry-run` flag prints planned changes
+     without writing.
+
+Tripwires checked:
+- `_select_pending` filter change · no other arc-link behaviors
+  affected · existing 13 linker tests still green (verified
+  before full suite). The filter only excludes a previously-bug
+  class of rows. Tripwire cleared.
+- `_FALLBACK_RESPONSE` change · only headline/summary fields
+  affected · defcon/category/confidence_self unchanged · the
+  existing `test_all_retries_fail_uses_fallback` test in
+  test_classifier.py still passes (it asserts on defcon and
+  category, not on headline/summary). Tripwire cleared.
+- Existing tests · 682 prior tests stayed green plus 16 new ·
+  no regressions detected.
+- Repair script tripwire (only 4 text columns updated) ·
+  enforced by the script's WHERE clause + a post-condition
+  print that surfaces last_update_at + last_update_cluster_id
+  values from the DB after the UPDATE. Tripwire cleared.
+
+Tests · 16 new across three files:
+- `tests/test_score/test_fallback.py` (NEW · 9 tests):
+  placeholder text pinned, non-empty guarantees, defcon/category
+  unchanged, pydantic max_length compliance, end-to-end cluster
+  row carries placeholder + integration with linker filter.
+- `tests/test_linker.py` (4 new in
+  `TestSelectPendingExcludesEmptyHeadlineClusters`): empty-string
+  headline doesn't seed arc, spaces-only headline doesn't seed,
+  real headline still seeds (sanity), placeholder headline
+  passes the filter.
+- `tests/test_writer/test_fallback.py` (3 new in
+  `TestPlaceholderHeadlineRendering`): placeholder arc renders
+  without `(başlıksız)`, placeholder summary appears under
+  `**Güncelleme**`, stalled placeholder overflow bullet shape.
+
+Verified: ruff clean on all changed files; full suite expected
+698 passed, 2 skipped (was 682/2 → +16 new tests, zero
+regressions).
+
+Operator caveats:
+- The repair script is NOT auto-run · operator should run with
+  `--dry-run` first to inspect, then apply.
+- After the repair, the writer/TTS need to re-run (either via
+  `--stage write --force` or by waiting for the next nightly)
+  to refresh the on-disk briefing markdown + audio with the
+  repaired arc content.
+- The `confidence_self="low"` literal in `_FALLBACK_RESPONSE`
+  is dead at the consumer but required at the schema. Removing
+  the field from `WorkerResponse` (making it Optional or
+  defaulting it) is a wider change and was out of scope.
+- The empty-headline filter in `_select_pending` is intentionally
+  loose (DuckDB's default trim strips spaces only). If a future
+  bug surfaces tab/newline-only headlines, the filter would
+  upgrade to `regexp_replace(c.headline, '\s', '')`. Not needed
+  today.
