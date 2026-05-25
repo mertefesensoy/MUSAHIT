@@ -1,13 +1,14 @@
 # ❯ MÜŞAHİT roadmap
 
-Working document. Updated as work progresses. Last updated 2026-05-24.
+Working document. Updated as work progresses. Last updated 2026-05-25.
 
 ## ❯ Status
 
 The pipeline runs end-to-end and ships a complete briefing with audio.
-First clean nightly briefing landed 2026-05-24. The remaining work is
-roughly half "fix known issues from production" and half "complete the
-deployment surface that was deferred during the build phase."
+First clean nightly briefing landed 2026-05-24. Three consecutive clean
+briefings as of 2026-05-25. The remaining work is roughly half "fix
+known issues from production" and half "complete the deployment
+surface that was deferred during the build phase."
 
 Test count: 627 passing, 2 skipped. Six implementation fixes shipped
 since 2026-05-23. One ADR amendment (ADR-009).
@@ -17,9 +18,70 @@ since 2026-05-23. One ADR amendment (ADR-009).
 These are bugs identified during production runs that haven't been
 fixed yet. Listed in rough priority order.
 
+### Government source coverage critical gap
+
+Status: pending · structural issue · elevated priority
+
+Roughly half of MÜŞAHİT's government-source surface is broken across
+all runs:
+
+* `anayasa_mahkemesi` (HTTP_ERROR) · constitutional court
+* `cumhurbaskanligi` (HTTP_ERROR) · presidency
+* `danistay` (HTTP_ERROR) · council of state
+* `yargitay` (HTTP_ERROR) · supreme court of appeals
+* `kap` (PARSE_ERROR) · capital markets authority filings
+* `resmi_gazete` · status unclear from logs (silently absent from
+  failures · may indicate silent failure rather than success)
+
+The bias-band concept (per ADR-003) assumes government sources are
+part of the corroboration triangle. With half of them broken, the
+bias balance is structurally skewed toward opposition + mainstream +
+foreign. Government sources should be the most observed, not the
+most broken.
+
+Real-world cost surfaced 2026-05-25: the Bilgi University re-opening
+(Cumhurbaşkanlığı Kararı in Resmî Gazete) was missed in the voiced
+section. Mainstream picked it up but MÜŞAHİT couldn't track it from
+the authoritative source. By the time it surfaced, the briefing
+treated it as a tertiary story.
+
+Components needed:
+* Diagnostic per failing source · why each fails (UA blocking, JS
+  rendering required, URL changed, session cookies, etc.)
+* Custom scrapers per source · government sites rarely follow
+  scraping conventions
+* Possible "GovScraper" base class with Playwright/Selenium fallback
+* Possibly · DEFCON promotion logic for government-sourced clusters
+  (a presidential decree is materially different from a tweet)
+* Possibly · ADR amendment around source weighting
+
+Estimated scope: 1-2 sessions. Diagnostic-first investigation.
+
+### Arc continuation summaries don't evolve
+
+Status: starting work today (2026-05-25)
+
+Arc summaries are frozen at arc-seed time. Day 3 of the MİT Syria
+arc reads identical to day 1 · same sentence, same "Açıldı"
+date. The operator hears the same content repeatedly with no
+signal of whether the story is moving or stalled.
+
+Fix shape (Option C from design discussion):
+* Schema: `arcs.last_update_summary`, `arcs.last_update_headline`,
+  `arcs.last_update_at`, `arcs.last_update_cluster_id`
+* Arc-link: every joining cluster updates these fields (most recent
+  wins · same-day continuations evolve too)
+* Writer: active-today arcs render `**Güncelleme** · [today's
+  cluster summary]`; stalled arcs render the original with
+  `**Son güncelleme** · X gün önce` and an explicit "Bu arc'da bugün
+  yeni gelişme yok" line
+* TTS: active-today arcs get priority in the Öne Çıkanlar voiced cap
+
+Started: 2026-05-25 afternoon.
+
 ### Trendyol writer unusable · architectural
 
-Status: pending · biggest remaining bug · likely needs ADR-002 amendment
+Status: pending · biggest LLM issue · likely needs ADR-002 amendment
 
 The writer LLM (`serkandyck/trendyol-llm-7b-chat-v1.8-gguf`) cannot
 reliably follow the eight-section template prompt. Four retry attempts
@@ -39,20 +101,21 @@ Options:
 * Hybrid · use Trendyol for individual section content and assemble
   deterministically
 
-Estimated scope: 4-6 hours of investigation + experimentation. Probably
-its own session.
+Estimated scope: 4-6 hours of investigation + experimentation. Own session.
 
 ### DEFCON-3 promotion collapse · model/prompt issue
 
 Status: pending · second-deepest finding
 
 Qwen2.5 systematically under-rates Turkish news severity. From the
-2026-05-23 smoke run: 242 clusters scored, only 1 reached DEFCON 3
-(MİT Syria operation). Cluster examples that should have been DEFCON 3:
-* Fethiye mayor shooting (rated AMBIENT)
-* 168 children killed in airstrike (rated AMBIENT)
-* 25 arrested in major operation (rated AMBIENT)
-* US-Iran ceasefire negotiations (rated DEFCON 4 today)
+2026-05-25 run: 487 clusters scored, only 1 reached DEFCON 3 (the
+ongoing MİT Syria arc). Cluster examples that should have been
+DEFCON 3 today:
+
+* Bilgi University police intervention with pepper gas (11 sources!)
+* CHP HQ police intervention
+* Magnitude 4.9 Adana earthquake
+* US-Iran ceasefire negotiations
 
 The ladder is collapsing toward DEFCON 4-5. Categorization is mostly
 correct; severity rating is the failure surface.
@@ -66,16 +129,16 @@ Investigation needed:
   swap · ADR-004 amendment
 
 Estimated scope: 4-6 hours of careful data exploration. Own session.
-May need ADR-004 amendment if anchor definitions need adjustment.
 
 ### Empty-headline arcs in fallback briefing
 
-Status: pending · small
+Status: pending · small · slightly higher priority now
 
-Two arcs from 2026-05-23 leak into the briefing as `(başlıksız) ·
-AMBİYANS · SINIFLANDIRILMADI`. The fallback writer should suppress
-these. One-line fix in `_render_arc` to skip arcs with empty headlines
-or missing categories.
+Two arcs (`arc_20260523_0036`, `arc_20260523_0146`) leak into the
+briefing as `(başlıksız) · SINIFLANDIRILMADI`. As of 2026-05-25,
+one of these now leaks into the voiced Öne Çıkanlar section, not
+just the bulleted tail. The audio will read out a section header
+with no content. The fallback writer should suppress these.
 
 Estimated scope: 30 minutes.
 
@@ -83,13 +146,15 @@ Estimated scope: 30 minutes.
 
 Status: pending · ongoing operational
 
-11 sources fail reliably across runs:
+15 sources fail across runs as of 2026-05-25 · roughly the same set
+as 2026-05-23 with `yargitay (HTTP_ERROR)` newly joining. Several of
+these overlap with the gov-source gap above. Non-gov failures:
+
 * `milliyet` · RSS parse error (mismatched tag)
 * `cumhuriyet` · RSS returns empty
 * `halk_tv` · 301 redirect to broken feed
 * `medyascope` · 403 forbidden
 * `dunya` · RSS parse error
-* `kap` · returns HTML 307 redirect, not parseable as RSS
 * `mahfi` · RSS parse error
 * `voa_tr` · 404 (URL rot · API endpoint changed)
 * `reuters_tr` · DNS failure (`feeds.reuters.com` gone)
@@ -175,6 +240,24 @@ The DEFCON-3 and source-tuning work both need ad-hoc data exploration
 scripts that don't exist yet. Worth building a small `scripts/explore/`
 directory with reusable query helpers.
 
+## ❯ Parked ideas
+
+### AĞ · corruption network graph
+
+Notes in personal Obsidian vault. Separate sibling project that would
+ingest MÜŞAHİT's data alongside UYAP, KAP, Resmî Gazete, investigative
+journalism. Graph of politicians, businesses, contracts, cases.
+Inspired by Brazilian OSINT projects.
+
+Hard problems flagged: entity disambiguation · truth-status taxonomy
+(claimed/reported/charged/convicted) · legal exposure (TCK 125/267/299) ·
+source-bias selection · curation workflow.
+
+Realistic scope: 6-12 month side project. Phase 0 (design) before any
+code · 1-2 weeks at minimum.
+
+Status: parked. Don't start until MÜŞAHİT is shipping and stable.
+
 ## ❯ Operator daily routine (when deployed)
 
 1. Wake at 07:00 · check phone for liveness alert (should be none)
@@ -200,3 +283,6 @@ This routine is the actual product. Everything else is infrastructure.
   feels obvious.
 * When pulling a code file for diagnosis, always read it before
   reasoning about it. Memory of the structure is unreliable.
+* Government sources are blind spots that compound. Whenever a major
+  story is missed, check whether a gov source should have caught it
+  first.
