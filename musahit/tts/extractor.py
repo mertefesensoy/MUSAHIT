@@ -77,6 +77,22 @@ _DIGER_MARKER = "### Diğer Açık Hikayeler"
 # Source-attribution line (visual-only, dropped from DEFCON 3).
 _KAYNAKLAR_RE = re.compile(r"^\*?\*?Kaynaklar\*?\*?\s*·.*$", flags=re.MULTILINE)
 
+# Arc-evolution stalled marker (added 2026-05-25 · see
+# ``musahit.writer.fallback.ARC_STALLED_MARKER``). The fallback renderer
+# emits this italic line inside every stalled open arc's body so the
+# operator sees, visually, that the arc had no new clusters today. Voicing
+# it would mean Piper saying "Bu arc'da bugün yeni gelişme yok" once per
+# stalled arc · a wall of identical sentences. The visual marker is
+# enough on the dashboard; the voiced scope drops it. The Güncelleme
+# prefix on active-today arcs IS voiced (it carries the actual update
+# content) so we only strip this specific stalled line, not all italic
+# text. Single-line literal match keeps the strip surgical.
+_STALLED_MARKER_LINE = "*Bu arc'da bugün yeni gelişme yok.*"
+_STALLED_RE = re.compile(
+    r"^\s*\*Bu arc'da bugün yeni gelişme yok\.\*\s*$",
+    flags=re.MULTILINE,
+)
+
 
 @dataclass(frozen=True)
 class VoicedBriefing:
@@ -132,15 +148,24 @@ def extract_voiced_briefing(briefing_md: str) -> VoicedBriefing:
     bucketing content under whichever ``## ❯`` section it currently
     belongs to. The very first lines (above any section marker) form
     the header.
+
+    Per-section text scrubbing:
+
+    * DEFCON 3 (MATERYAL) drops ``**Kaynaklar** · …`` source-attribution
+      lines (visual-only per ADR-009).
+    * AÇIK GELİŞMELER (OPEN_ARCS) drops the arc-evolution stalled marker
+      line (``*Bu arc'da bugün yeni gelişme yok.*``) from voiced text ·
+      the Güncelleme prefix on active-today arcs IS voiced.
     """
     sections = _split_into_sections(briefing_md)
     found = tuple(m for m in ALL_MARKERS if m in sections)
     defcon_3_text = _strip_source_lines(sections.get(MARKER_DEFCON_3, ""))
+    open_arcs_text = _strip_stalled_markers(sections.get(MARKER_OPEN_ARCS, ""))
     return VoicedBriefing(
         header=sections.get("__header__", "").strip(),
         defcon_priority=sections.get(MARKER_DEFCON_1_2, "").strip(),
         defcon_material=defcon_3_text.strip(),
-        open_arcs=sections.get(MARKER_OPEN_ARCS, "").strip(),
+        open_arcs=open_arcs_text.strip(),
         closing=CLOSING_LINE,
         found_markers=found,
     )
@@ -204,6 +229,18 @@ def _strip_source_lines(text: str) -> str:
     source attribution.
     """
     return _KAYNAKLAR_RE.sub("", text)
+
+
+def _strip_stalled_markers(text: str) -> str:
+    """Remove the arc-evolution stalled marker line from voiced text.
+
+    Per the 2026-05-25 arc-evolution design, every stalled open arc gets
+    an italic ``*Bu arc'da bugün yeni gelişme yok.*`` line in its body.
+    Voicing it would mean Piper repeating the same sentence once per
+    stalled arc · the visual marker on the dashboard is enough. Active-
+    today arcs use a ``**Güncelleme** · …`` prefix instead (voiced).
+    """
+    return _STALLED_RE.sub("", text)
 
 
 __all__ = [

@@ -339,6 +339,11 @@ class ArcLinker:
         # ADR-005 amendment).
         new_peak = min(arc.peak_defcon, cluster.final_defcon)
         new_entities = arc.entities | filtered_entities
+        # last_update_* triplet: every joining cluster overwrites these so
+        # the briefing renderer can show what the latest evolution looked
+        # like. Last call wins (matches existing last_update_at semantics).
+        # The arc-evolution design (2026-05-25) explicitly does NOT add a
+        # length-based fallback or skip same-day joins · every join evolves.
         self._update_arc(
             arc_id=arc_id,
             state=new_state,
@@ -346,6 +351,9 @@ class ArcLinker:
             peak_defcon=new_peak,
             entity_set=new_entities,
             new_centroid=new_centroid,
+            last_update_summary=cluster.summary,
+            last_update_headline=cluster.headline,
+            last_update_cluster_id=cluster.id,
         )
 
         # 4) Refresh the in-memory cache so subsequent clusters in this run
@@ -379,13 +387,19 @@ class ArcLinker:
         """
         arc_id = f"arc_{cluster.created_at.strftime('%Y%m%d')}_{counter:04d}"
         now = utcnow()
+        # last_update_* triplet starts equal to the seed cluster's data so
+        # a 0-day arc renders as active-today via the same code path as a
+        # newly-joined cluster (see writer.payload.is_active_today). The
+        # seed headline/summary remain the stable "first known" values in
+        # the existing columns; last_update_* evolve on every later join.
         self._conn.execute(
             """
             INSERT INTO arcs (
                 id, created_at, headline, summary, state, last_update_at,
-                category, peak_defcon, entity_set
+                category, peak_defcon, entity_set,
+                last_update_summary, last_update_headline, last_update_cluster_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 arc_id,
@@ -397,6 +411,9 @@ class ArcLinker:
                 cluster.category,
                 cluster.final_defcon,
                 json.dumps(sorted(filtered_entities)),
+                cluster.summary,
+                cluster.headline,
+                cluster.id,
             ],
         )
         self._conn.execute(
@@ -528,6 +545,10 @@ class ArcLinker:
         peak_defcon: int,
         entity_set: set[str],
         new_centroid: list[float],
+        *,
+        last_update_summary: str,
+        last_update_headline: str,
+        last_update_cluster_id: str,
     ) -> None:
         """Update arcs row + arc_centroids row using the FK workaround.
 
@@ -575,15 +596,22 @@ class ArcLinker:
         for cluster_id in member_cluster_ids:
             self._update_cluster_arc_id_to_value(cluster_id, None)
 
-        # UPDATE the arc itself.
+        # UPDATE the arc itself. The last_update_* triplet (added in
+        # migration 004 · arc-evolution 2026-05-25) is overwritten on
+        # every join so the briefing renderer can present the most
+        # recent cluster's content under a Güncelleme prefix while the
+        # seed headline/summary stay stable in the original columns.
         now = utcnow()
         self._conn.execute(
             """
             UPDATE arcs
-               SET state           = ?,
-                   last_update_at  = ?,
-                   peak_defcon     = ?,
-                   entity_set      = ?
+               SET state                  = ?,
+                   last_update_at         = ?,
+                   peak_defcon            = ?,
+                   entity_set             = ?,
+                   last_update_summary    = ?,
+                   last_update_headline   = ?,
+                   last_update_cluster_id = ?
              WHERE id = ?
             """,
             [
@@ -591,6 +619,9 @@ class ArcLinker:
                 last_update_at,
                 peak_defcon,
                 json.dumps(sorted(entity_set)),
+                last_update_summary,
+                last_update_headline,
+                last_update_cluster_id,
                 arc_id,
             ],
         )

@@ -42,6 +42,15 @@ VOICED_OPEN_ARCS_CAP: int = 10
 _HIGHLIGHT_SUBSECTION_MARKER: str = "### Öne Çıkanlar"
 _OTHER_SUBSECTION_MARKER: str = "### Diğer Açık Hikayeler"
 
+# Arc-evolution markers (2026-05-25). The Güncelleme prefix introduces an
+# active-today arc's evolved body using ``last_update_summary``. The
+# stalled marker is dropped from voiced TTS scope by
+# ``musahit/tts/extractor.py``; the Güncelleme prefix IS voiced. Kept here
+# as module constants so tests and the TTS extractor can import the exact
+# strings rather than re-deriving them.
+ARC_UPDATE_PREFIX: str = "**Güncelleme** ·"
+ARC_STALLED_MARKER: str = "*Bu arc'da bugün yeni gelişme yok.*"
+
 
 def render_fallback_briefing(payload: BriefingPayload) -> str:
     """Render a complete, validator-passing briefing markdown from ``payload``."""
@@ -136,18 +145,32 @@ def _render_open_arcs(payload: BriefingPayload) -> str:
     return "\n".join(parts)
 
 
-def _arc_sort_key(arc: ArcView) -> tuple[int, float]:
-    """Severity-then-recency sort key for the open-arcs subsection split.
+def _arc_sort_key(arc: ArcView) -> tuple[int, int, float]:
+    """Active-then-severity-then-recency sort key for the voiced cap split.
 
-    Returns ``(peak_defcon, -epoch_seconds)`` so ``sorted(..., key=)``
-    ascending yields most-severe-first, then most-recent-first within
-    each severity tier. Falls back to ``created_at`` when
-    ``last_update_at`` is missing; both missing tiebreaks to epoch 0.0
-    (deterministic, predictable for tests).
+    Returns ``(active_tier, peak_defcon, -epoch_seconds)`` so ``sorted(...,
+    key=)`` ascending yields:
+
+    1. ``active_tier`` (0 for active-today, 1 for stalled) · puts every
+       active-today arc ahead of every stalled arc. This is the
+       2026-05-25 arc-evolution priority rule · active arcs always
+       compete for the voiced cap before stalled ones do.
+    2. ``peak_defcon`` ascending · lower int = more severe wins.
+    3. ``-epoch_seconds`` · most recent first within the same severity.
+
+    Falls back to ``created_at`` when ``last_update_at`` is missing; both
+    missing tiebreaks to epoch 0.0 (deterministic, predictable for tests).
+
+    Backward-compat note: legacy fixtures that build ``ArcView`` without
+    setting ``is_active_today`` default to ``False`` (stalled). The
+    relative ordering within stalled or within active is unchanged from
+    the pre-2026-05-25 ``(peak, -epoch)`` key, so prior tests that
+    construct a single-tier list still pass.
     """
+    active_tier = 0 if arc.is_active_today else 1
     dt = arc.last_update_at or arc.created_at
     epoch = dt.timestamp() if dt is not None else 0.0
-    return (int(arc.peak_defcon), -epoch)
+    return (active_tier, int(arc.peak_defcon), -epoch)
 
 
 def _render_arc_overflow_bullet(arc: ArcView) -> str:
@@ -261,6 +284,28 @@ def _render_compact_cluster(c: ClusterView) -> str:
 
 
 def _render_arc(arc: ArcView, *, closing: bool = False) -> str:
+    """Render one arc block · branches on ``is_active_today`` per arc-evolution.
+
+    Three output shapes:
+
+    * **Closing** (``closing=True``) · used for the RESOLVED arcs section.
+      Standard header + seed summary + "Bu hikaye bugün kapatıldı." line.
+      Not affected by ``is_active_today`` · a freshly resolved arc reads
+      its closure note rather than an active/stalled tag.
+    * **Active-today** (``is_active_today=True``) · standard header,
+      then a Güncelleme prefix carrying ``last_update_summary`` (the most
+      recent joining cluster's summary). Falls back to ``summary`` when
+      ``last_update_summary`` is empty (migration 004 backfill makes this
+      rare, but legacy fixtures without the field land here).
+    * **Stalled** (open arc with ``is_active_today=False``) · standard
+      header PLUS a Son güncelleme · X gün önce line so the operator
+      sees how stale the story has become. Body is the seed ``summary``
+      followed by the italic stalled marker
+      (``*Bu arc'da bugün yeni gelişme yok.*``). The marker is voiced-
+      excluded by ``musahit.tts.extractor`` so the operator hears the
+      summary once and isn't told "no update today" verbally for every
+      stalled arc · the visual marker is enough on the dashboard.
+    """
     label = DEFCON_LABEL_TR.get(DEFCON(arc.peak_defcon), str(arc.peak_defcon))
     cat = arc.category or "SINIFLANDIRILMADI"
     lines = [
@@ -273,12 +318,31 @@ def _render_arc(arc: ArcView, *, closing: bool = False) -> str:
         )
     else:
         lines.append(f"**Zirve DEFCON** · {label} · **Kategori** · {cat}")
-    if arc.summary:
-        lines.append("")
-        lines.append(arc.summary)
+
     if closing:
+        if arc.summary:
+            lines.append("")
+            lines.append(arc.summary)
         lines.append("")
         lines.append("Bu hikaye bugün kapatıldı.")
+        return "\n".join(lines)
+
+    if arc.is_active_today:
+        update_body = arc.last_update_summary or arc.summary
+        if update_body:
+            lines.append("")
+            lines.append(f"{ARC_UPDATE_PREFIX} {update_body}")
+    else:
+        # Stalled: add the Son güncelleme line into the header block, then
+        # render seed summary + italic stalled marker as the body.
+        lines.append(
+            f"**Son güncelleme** · {arc.days_since_last_update} gün önce"
+        )
+        if arc.summary:
+            lines.append("")
+            lines.append(arc.summary)
+        lines.append("")
+        lines.append(ARC_STALLED_MARKER)
     return "\n".join(lines)
 
 
@@ -302,4 +366,9 @@ def _format_date(d: date) -> str:
     return f"{d.day} {_MONTHS_TR[d.month - 1]} {d.year}"
 
 
-__all__ = ["VOICED_OPEN_ARCS_CAP", "render_fallback_briefing"]
+__all__ = [
+    "ARC_STALLED_MARKER",
+    "ARC_UPDATE_PREFIX",
+    "VOICED_OPEN_ARCS_CAP",
+    "render_fallback_briefing",
+]

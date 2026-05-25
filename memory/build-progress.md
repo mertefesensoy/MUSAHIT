@@ -983,3 +983,125 @@ Operator caveats:
 - `IngestPoller.run()` called standalone (outside the
   orchestrator) still wipes the row · that behaviour is
   intentional and preserved.
+
+### Between-step · arc evolution (active-today vs stalled) · 2026-05-25
+
+Doc: `docs/implementations/2026-05-25-arc-evolution.md`
+
+Arc summaries used to freeze at seed time · the MİT Syria arc read
+identical sentence + identical "Açıldı" on day 1, 2, 3. The
+operator's audio briefing had no signal whether a story was moving
+or stalled. Fix is four-layered:
+
+1. **Schema** · migration 004 adds three nullable columns to
+   `arcs`: `last_update_summary`, `last_update_headline`,
+   `last_update_cluster_id`. The existing `last_update_at` column
+   already had the right semantics (set on every join). Backfill
+   copies `summary` / `headline` into the new columns and picks
+   the most-recently-created linked cluster (via correlated
+   subquery) for `last_update_cluster_id`. NULL-safe at every
+   read site.
+
+2. **Linker** (`musahit/arcs/linker.py`) · `_seed_arc` INSERT
+   extended to 12 columns (was 9), initializing the triplet to
+   the seed cluster's data so a 0-day arc reads as active-today
+   via the same path as a later join. `_attach_cluster` passes
+   the joining cluster's `(summary, headline, id)` into
+   `_update_arc` as three new keyword-only params; `_update_arc`'s
+   UPDATE sets the triplet alongside `state`/`last_update_at`/
+   `peak_defcon`/`entity_set`. Last call wins on multi-join · same
+   semantics as the existing `last_update_at`.
+
+3. **Payload** (`musahit/writer/payload.py`) · `ArcView` gains
+   five fields (three column mirrors + `is_active_today` +
+   `days_since_last_update`), all with defaults so legacy
+   fixtures still construct positionally. `_load_arcs` now takes
+   `briefing_date` (threaded from `build_payload`) and computes
+   `is_active_today = last_update_at >= run.started_at` plus
+   `days_since_last_update = (briefing_date − last_update_at.date()).days`
+   (floored at 0). Uses `started_at` rather than `completed_at`
+   because the writer reads the payload BEFORE `completed_at` is
+   written.
+
+4. **Renderer** (`musahit/writer/fallback.py`) · `_render_arc`
+   branches three ways:
+   - Closing (RESOLVED) · unchanged.
+   - Active-today · header + `**Güncelleme** · {last_update_summary
+     or summary}` body.
+   - Stalled · header + `**Son güncelleme** · X gün önce` line +
+     seed summary + italic stalled marker `*Bu arc'da bugün yeni
+     gelişme yok.*`.
+   `_arc_sort_key` becomes a 3-tuple `(active_tier, peak_defcon,
+   -epoch)` so every active arc sorts before every stalled arc in
+   the Öne Çıkanlar voiced-cap split. New module constants
+   `ARC_UPDATE_PREFIX` and `ARC_STALLED_MARKER` exported so the
+   TTS extractor + tests can reference the exact strings rather
+   than re-deriving them.
+
+5. **TTS extractor** (`musahit/tts/extractor.py`) ·
+   `_strip_stalled_markers` runs single-line regex over the
+   OPEN_ARCS section content before voiced bucketing. The
+   Güncelleme prefix is voiced (carries actual content); the
+   italic stalled marker is voiced-excluded (visual signal is
+   enough · voicing "bugün yeni gelişme yok" 10× per briefing
+   would be noise).
+
+Tripwires checked:
+- Joining-cluster event IS cleanly detectable in linker · every
+  `_attach_cluster` call gets the cluster's full row. Tripwire
+  cleared.
+- Migration data integrity · ALTER ADD COLUMN IF NOT EXISTS +
+  NULL-safe UPDATE statements + correlated subquery (DuckDB
+  supports). Existing rows backfill from `summary` / `headline`.
+  Idempotent re-application is moot · schema_version blocks it.
+  Tripwire cleared.
+- TTS · the italic marker is a unique single-line literal; the
+  regex is anchored. No ambiguity with prose italic that might
+  appear elsewhere. Tripwire cleared.
+- Trendyol path · the writer LLM prompt was deliberately NOT
+  touched · LLM-generated briefings won't yet emit Güncelleme
+  prefix or stalled marker, but smoke runs currently fall to the
+  Python renderer anyway (which DOES produce the new shape). LLM
+  prompt update is a future amendment if Trendyol stabilizes.
+  Tripwire cleared.
+- Voiced-cap gate · resolved via sort-priority rather than a
+  strict high-DEFCON filter. Active-today wins the cap; stalled
+  fills remaining slots by severity. The strict-gate
+  interpretation would have broken
+  `test_eleven_arcs_produce_one_highlight_and_one_overflow` (an
+  11-MATERIAL-stalled regression from 2026-05-24). Tripwire
+  cleared with documented rationale in the impl doc.
+
+Tests · 18 new in `tests/test_arc_evolution.py` covering:
+migration backfill (3 tests for the three backfill statements);
+linker seed (1) + join (1) + multi-join same-run last-wins (1);
+payload `is_active_today` true/false (2) + `days_since_last_update`
+against briefing_date (1); renderer active-today Güncelleme (1) +
+stalled Son güncelleme + italic marker (1) + active fallback to
+seed summary when `last_update_summary` is empty (1); voiced-cap
+prioritization active-routine ahead of stalled-severe (1); TTS
+extractor strips stalled marker (1) + keeps Güncelleme (1) +
+section-scoped strip leaves OTHER sections alone (1) + no-marker
+no-op (1).
+
+Also bumped `tests/test_init_db.py` migrations_applied expectation
+from 3 to 4 in six places + the `schema_version` row-count
+assertion.
+
+Verified: ruff clean on changed Python files; full suite **645
+passed, 2 skipped** (was 627 / 2 → +18 new tests, zero regressions).
+Test time 295s (≈ 5 min).
+
+Operator caveats:
+- Existing arc rows get backfilled automatically the first time
+  `init_db` runs against an existing DB (migration 004 picks them
+  up · backfill UPDATE is NULL-guarded).
+- Smoke run will surface the new shape in the next nightly. If
+  Trendyol-LLM begins producing real briefings (rather than
+  falling to the Python renderer), the LLM prompt needs an
+  amendment so the LLM also emits the Güncelleme / stalled
+  shape · queued, not yet filed.
+- The `last_update_at` on backfilled rows is whatever the existing
+  row already had. If that was NULL on a legacy arc, the renderer
+  treats the arc as stalled with 0 days · same behavior as before
+  the migration · safe.

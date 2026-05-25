@@ -58,7 +58,15 @@ class ClusterView:
 
 @dataclass(frozen=True)
 class ArcView:
-    """Subset of an arc row that the writer/fallback consume."""
+    """Subset of an arc row that the writer/fallback consume.
+
+    The trailing five fields (``last_update_*`` triplet + ``is_active_today``
+    + ``days_since_last_update``) were added by the 2026-05-25 arc-evolution
+    work. They default safely so legacy test fixtures continue to construct
+    ``ArcView`` with only the original eight fields · in that case the arc
+    renders as stalled with a 0-day staleness, falling back to the seed
+    ``summary``/``headline`` via the renderer's NULL-safe paths.
+    """
 
     id: str
     headline: str
@@ -68,6 +76,20 @@ class ArcView:
     category: str | None
     last_update_at: datetime | None
     created_at: datetime | None
+    # ── arc-evolution fields ──
+    # last_update_* mirror the corresponding columns on `arcs`; they evolve
+    # with each joining cluster while headline/summary stay at seed values.
+    last_update_summary: str = ""
+    last_update_headline: str = ""
+    last_update_cluster_id: str | None = None
+    # is_active_today is True when last_update_at falls within this run's
+    # window (started_at..now). The renderer branches on it: active arcs
+    # show a Güncelleme · prefix, stalled arcs show an italic stalled
+    # marker plus a Son güncelleme · X gün önce line.
+    is_active_today: bool = False
+    # days_since_last_update is briefing_date − last_update_at.date(). Used
+    # only for the stalled-arc header; 0 for active-today (irrelevant).
+    days_since_last_update: int = 0
 
 
 @dataclass(frozen=True)
@@ -133,7 +155,11 @@ def build_payload(
     stages_done = json.loads(stages_json) if stages_json else []
 
     clusters_by_defcon = _load_clusters(conn, run_id)
-    open_arc_updates, resolved_arcs = _load_arcs(conn, run_id)
+    # _load_arcs needs the briefing date (for days_since_last_update) and
+    # the run window (for is_active_today). started_at is fetched again
+    # inside _load_arcs against the same run_id · briefing_date is computed
+    # above and threaded through here.
+    open_arc_updates, resolved_arcs = _load_arcs(conn, run_id, briefing_date)
     failed_sources = _load_failed_sources(conn, run_id)
 
     cluster_count = sum(len(v) for v in clusters_by_defcon.values())
@@ -227,19 +253,53 @@ def _load_cluster_sources(
 
 
 def _load_arcs(
-    conn: duckdb.DuckDBPyConnection, run_id: str
+    conn: duckdb.DuckDBPyConnection, run_id: str, briefing_date: date
 ) -> tuple[list[ArcView], list[ArcView]]:
-    """Open arcs that received updates today + arcs that resolved today."""
+    """Open arcs that received updates today + arcs that resolved today.
+
+    Each ArcView is enriched with the arc-evolution triplet (last_update_*)
+    plus two computed flags:
+
+    * ``is_active_today`` — True when ``last_update_at`` falls within this
+      run's window. The window is ``started_at..now`` (we use ``now`` rather
+      than the row's ``completed_at`` because the writer runs before
+      ``completed_at`` is set). Any arc the linker touched in this run will
+      have ``last_update_at = cluster.created_at`` (set within seconds of
+      run start) so the comparison ``>= started_at`` cleanly catches it.
+    * ``days_since_last_update`` — ``briefing_date − last_update_at.date()``
+      in days. Used by the stalled-arc header to show how stale the arc has
+      become. ``0`` when ``last_update_at`` is NULL (legacy arcs created
+      before migration 004's backfill ran; the renderer treats them as
+      active-today candidates with a 0-day staleness).
+
+    Schema columns ``last_update_summary``/``last_update_headline``/
+    ``last_update_cluster_id`` were added in migration 004. They may be
+    NULL on rows that pre-date the backfill · the renderer falls back to
+    the seed ``summary``/``headline`` in that case.
+    """
     started_at = conn.execute(
         "SELECT started_at FROM pipeline_runs WHERE run_id = ?",
         [run_id],
     ).fetchone()
     run_started = started_at[0] if started_at else None
 
+    def _is_active_today(last_update_at: datetime | None) -> bool:
+        if last_update_at is None or run_started is None:
+            return False
+        return last_update_at >= run_started
+
+    def _days_stale(last_update_at: datetime | None) -> int:
+        if last_update_at is None:
+            return 0
+        delta = (briefing_date - last_update_at.date()).days
+        return max(delta, 0)
+
     open_cursor = conn.execute(
         """
         SELECT DISTINCT a.id, a.headline, a.summary, a.state, a.peak_defcon,
-               a.category, a.last_update_at, a.created_at
+               a.category, a.last_update_at, a.created_at,
+               a.last_update_summary, a.last_update_headline,
+               a.last_update_cluster_id
           FROM arcs a
           JOIN clusters c ON c.arc_id = a.id
           JOIN cluster_articles ca ON ca.cluster_id = c.id
@@ -260,6 +320,11 @@ def _load_arcs(
             category=r[5],
             last_update_at=r[6],
             created_at=r[7],
+            last_update_summary=r[8] or "",
+            last_update_headline=r[9] or "",
+            last_update_cluster_id=r[10],
+            is_active_today=_is_active_today(r[6]),
+            days_since_last_update=_days_stale(r[6]),
         )
         for r in open_cursor.fetchall()
     ]
@@ -267,7 +332,9 @@ def _load_arcs(
     resolved_cursor = conn.execute(
         """
         SELECT a.id, a.headline, a.summary, a.state, a.peak_defcon,
-               a.category, a.last_update_at, a.created_at
+               a.category, a.last_update_at, a.created_at,
+               a.last_update_summary, a.last_update_headline,
+               a.last_update_cluster_id
           FROM arcs a
          WHERE a.state = ?
            AND (? IS NULL OR a.last_update_at >= ?)
@@ -285,6 +352,11 @@ def _load_arcs(
             category=r[5],
             last_update_at=r[6],
             created_at=r[7],
+            last_update_summary=r[8] or "",
+            last_update_headline=r[9] or "",
+            last_update_cluster_id=r[10],
+            is_active_today=_is_active_today(r[6]),
+            days_since_last_update=_days_stale(r[6]),
         )
         for r in resolved_cursor.fetchall()
     ]
