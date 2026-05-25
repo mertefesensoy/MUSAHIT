@@ -503,3 +503,226 @@ class TestProtocolReturnType:
 def _row_count(conn: duckdb.DuckDBPyConnection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM raw_articles").fetchone()
     return int(row[0]) if row else 0
+
+
+# ── Gov-source path · curl_cffi (2026-05-25) ───────────────────────────────
+#
+# `HtmlIngester` routes any source in
+# `musahit.ingest.gov_http.SOURCE_IDS_USING_GOV_HTTP` through the
+# gov_http fetcher (curl_cffi-backed in production · FakeGovHttpFetcher
+# here) rather than the httpx client. The two paths share
+# `_persist_article` via duck typing on `(.content, .status_code,
+# .headers)`, so the assertions just need to verify the routing decision
+# and Referer-header plumbing; the persistence shape is already pinned by
+# the earlier non-gov tests.
+
+
+from musahit.ingest.gov_http import (  # noqa: E402 · grouped below shared helpers
+    GOV_REFERER,
+    FakeGovHttpFetcher,
+)
+from musahit.ingest.html_selectors import SelectorConfig as _SelCfg  # noqa: E402
+
+_GOV_TEST_SOURCE_ID = "yargitay"  # validated in the 2026-05-25 spike
+
+
+_YARGITAY_LISTING = b"""<!doctype html>
+<html><body><main>
+<a href="/haber/one">One</a>
+<a href="/haber/two">Two</a>
+</main></body></html>
+"""
+
+_YARGITAY_ARTICLE = b"""<!doctype html>
+<html><head><title>Y article</title></head>
+<body><h1>Y article</h1></body></html>
+"""
+
+
+class TestHtmlIngesterGovSourceRouting:
+    """Gov-tagged sources route through the injected gov_http fetcher."""
+
+    @pytest.fixture()
+    def gov_source(self):  # noqa: ANN001 · test-local
+        from musahit.ingest.sources import get_source
+
+        return get_source(_GOV_TEST_SOURCE_ID)
+
+    @pytest.fixture()
+    def gov_selectors(self):  # noqa: ANN001
+        return {
+            _GOV_TEST_SOURCE_ID: _SelCfg(
+                listing_selector="main",
+                article_link_selector="a",
+                title_selector="h1",
+            )
+        }
+
+    async def test_gov_source_uses_gov_http_not_httpx(
+        self,
+        ingest_db: duckdb.DuckDBPyConnection,
+        gov_source,
+        gov_selectors,
+    ) -> None:
+        # httpx_calls would be appended by the MockTransport responder if
+        # the ingester used the httpx path; we assert it stays empty.
+        httpx_calls: list[str] = []
+        httpx_client = _make_client(
+            _route_responder({}, calls=httpx_calls)
+        )
+
+        # gov_http carries the listing + per-article responses.
+        fake_gov = FakeGovHttpFetcher(
+            routes={
+                gov_source.url: (
+                    _YARGITAY_LISTING,
+                    200,
+                    {"content-type": "text/html"},
+                ),
+                "https://www.yargitay.gov.tr/haber/one": (
+                    _YARGITAY_ARTICLE,
+                    200,
+                    {"content-type": "text/html"},
+                ),
+                "https://www.yargitay.gov.tr/haber/two": (
+                    _YARGITAY_ARTICLE,
+                    200,
+                    {"content-type": "text/html"},
+                ),
+            }
+        )
+
+        async def fake_sleep(_: float) -> None:
+            return None
+
+        ingester = HtmlIngester(
+            conn=ingest_db,
+            client=httpx_client,
+            gov_http=fake_gov,
+            selectors=gov_selectors,
+            sleep=fake_sleep,
+        )
+        result = await ingester.fetch(gov_source)
+
+        assert result.status is IngestStatus.OK
+        assert result.count == 2
+        # The httpx client was not used.
+        assert httpx_calls == []
+        # gov_http saw: 1 listing GET + 2 article GETs (+ no bootstrap
+        # because we injected the fetcher without a configured
+        # bootstrap_url; the listing IS the cookie-seeding visit).
+        gov_urls = [c[0] for c in fake_gov.calls]
+        assert gov_source.url in gov_urls
+        assert "https://www.yargitay.gov.tr/haber/one" in gov_urls
+        assert "https://www.yargitay.gov.tr/haber/two" in gov_urls
+        assert fake_gov.closed is False  # injected fetcher not closed
+
+    async def test_article_fetches_send_configured_referer(
+        self,
+        ingest_db: duckdb.DuckDBPyConnection,
+        gov_source,
+        gov_selectors,
+    ) -> None:
+        fake_gov = FakeGovHttpFetcher(
+            routes={
+                gov_source.url: (_YARGITAY_LISTING, 200, None),
+                "https://www.yargitay.gov.tr/haber/one": (
+                    _YARGITAY_ARTICLE,
+                    200,
+                    None,
+                ),
+                "https://www.yargitay.gov.tr/haber/two": (
+                    _YARGITAY_ARTICLE,
+                    200,
+                    None,
+                ),
+            }
+        )
+
+        async def fake_sleep(_: float) -> None:
+            return None
+
+        await HtmlIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            selectors=gov_selectors,
+            sleep=fake_sleep,
+        ).fetch(gov_source)
+
+        # The listing fetch is invoked WITHOUT a Referer (it IS the bootstrap
+        # visit in the gov-source flow); article fetches send Referer =
+        # GOV_REFERER[source.id].
+        expected_referer = GOV_REFERER[_GOV_TEST_SOURCE_ID]
+        # Find the listing call and the article calls explicitly.
+        listing_calls = [c for c in fake_gov.calls if c[0] == gov_source.url]
+        article_calls = [
+            c
+            for c in fake_gov.calls
+            if c[0].startswith("https://www.yargitay.gov.tr/haber/")
+        ]
+        assert listing_calls and listing_calls[0][1] is None
+        assert article_calls
+        for url, referer in article_calls:
+            assert referer == expected_referer, (
+                f"article fetch for {url} did not carry the source Referer"
+            )
+
+    async def test_gov_fetch_exception_is_isolated_per_article(
+        self,
+        ingest_db: duckdb.DuckDBPyConnection,
+        gov_source,
+        gov_selectors,
+    ) -> None:
+        # First article fetch raises; second still succeeds and persists.
+        listing_url = gov_source.url
+        a1 = "https://www.yargitay.gov.tr/haber/one"
+        a2 = "https://www.yargitay.gov.tr/haber/two"
+
+        class _PartialFailFetcher(FakeGovHttpFetcher):
+            async def fetch(self_inner, url, *, referer=None):
+                if url == a1:
+                    raise RuntimeError("simulated curl_cffi reset")
+                return await super().fetch(url, referer=referer)
+
+        fake_gov = _PartialFailFetcher(
+            routes={
+                listing_url: (_YARGITAY_LISTING, 200, None),
+                a2: (_YARGITAY_ARTICLE, 200, None),
+            }
+        )
+
+        async def fake_sleep(_: float) -> None:
+            return None
+
+        result = await HtmlIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            selectors=gov_selectors,
+            sleep=fake_sleep,
+        ).fetch(gov_source)
+
+        # Article 1 failed (logged & skipped); article 2 succeeded.
+        assert result.status is IngestStatus.OK
+        assert result.count == 1
+        assert _row_count(ingest_db) == 1
+
+    async def test_listing_500_returns_http_error_no_article_fetches(
+        self,
+        ingest_db: duckdb.DuckDBPyConnection,
+        gov_source,
+        gov_selectors,
+    ) -> None:
+        fake_gov = FakeGovHttpFetcher(
+            routes={gov_source.url: (b"upstream gone", 500, None)}
+        )
+
+        result = await HtmlIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            selectors=gov_selectors,
+        ).fetch(gov_source)
+
+        assert result.status is IngestStatus.HTTP_ERROR
+        assert result.count == 0
+        # Only the listing URL was attempted.
+        assert [c[0] for c in fake_gov.calls] == [gov_source.url]

@@ -47,6 +47,13 @@ from musahit.common.logging import get_logger
 from musahit.common.time import to_utc_naive, utcnow
 from musahit.common.types import IngestStatus
 from musahit.ingest import USER_AGENT, IngestResult
+from musahit.ingest.gov_http import (
+    SOURCE_IDS_USING_GOV_HTTP,
+    GovHttpFetcher,
+    GovHttpResponse,
+    make_gov_http_fetcher_for,
+    referer_for,
+)
 from musahit.ingest.html_selectors import SELECTORS, SelectorConfig
 from musahit.ingest.sources import Source
 
@@ -241,14 +248,36 @@ class HtmlIngester:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         selectors: dict[str, SelectorConfig] | None = None,
         sleep: SleepFn | None = None,
+        gov_http: GovHttpFetcher | None = None,
     ) -> None:
         self._conn = conn
         self._client = client
         self._timeout_seconds = timeout_seconds
         self._selectors = selectors if selectors is not None else SELECTORS
         self._sleep: SleepFn = sleep if sleep is not None else asyncio.sleep
+        # gov_http is the curl_cffi-backed fetcher for ``*.gov.tr`` sources
+        # whose Akamai-fronted TLS rejects standard httpx (validated by the
+        # 2026-05-25 spike). When set, ``fetch`` routes any source in
+        # ``SOURCE_IDS_USING_GOV_HTTP`` through it instead of the httpx
+        # ``client``. When None, a production fetcher is lazily constructed
+        # on the first gov-source fetch via :func:`make_gov_http_fetcher_for`.
+        # Tests pass :class:`musahit.ingest.gov_http.FakeGovHttpFetcher`.
+        self._gov_http = gov_http
 
     async def fetch(self, source: Source) -> IngestResult:
+        # Route gov sources through curl_cffi; everything else stays on httpx.
+        # The two paths share ``_persist_article`` via duck typing on
+        # ``(.content, .status_code, .headers)`` — both httpx.Response and
+        # :class:`GovHttpResponse` expose that surface.
+        if source.id in SOURCE_IDS_USING_GOV_HTTP:
+            gov_http = self._gov_http or make_gov_http_fetcher_for(source.id)
+            try:
+                return await self._fetch_with_gov(gov_http, source)
+            finally:
+                # Only close fetchers we constructed; injected fetchers
+                # (tests) manage their own lifecycle.
+                if self._gov_http is None:
+                    await gov_http.close()
         if self._client is not None:
             return await self._fetch_with(self._client, source)
         async with httpx.AsyncClient(
@@ -348,6 +377,131 @@ class HtmlIngester:
         )
         return IngestResult(status=IngestStatus.OK, count=inserted)
 
+    # ── Gov-source flow (curl_cffi via GovHttpFetcher) ──────────────────
+
+    async def _fetch_with_gov(
+        self, gov_http: GovHttpFetcher, source: Source
+    ) -> IngestResult:
+        """Two-phase fetch using curl_cffi for ``*.gov.tr`` sources.
+
+        Mirrors :meth:`_fetch_with` but every HTTP call goes through the
+        ``gov_http`` fetcher: the listing GET acts as the session-cookie
+        bootstrap (the fetcher's lazy bootstrap is also a no-op for the
+        same URL), and each per-article GET sends the source's Referer
+        header so the CDN doesn't reject deep-link requests. Persistence
+        and parsing share the httpx flow's helpers via duck typing.
+        """
+        log = _log.bind(source_id=source.id, url=source.url)
+
+        config = self._selectors.get(source.id)
+        if config is None:
+            log.warning("html_no_selector_config")
+            return IngestResult(
+                status=IngestStatus.SKIPPED,
+                error=f"no SelectorConfig for source_id={source.id}",
+            )
+
+        referer = referer_for(source.id)
+
+        # Phase 1: listing fetch. Doubles as the bootstrap visit when the
+        # fetcher's configured bootstrap_url == source.url (which is the
+        # common case · the source URL IS the homepage).
+        listing = await self._gov_http_get(gov_http, source.url, referer=None)
+        if isinstance(listing, IngestResult):
+            return listing
+
+        # Phase 2: extract article URLs.
+        try:
+            raw_urls = self._extract_listing_urls(
+                listing.content, source.url, config
+            )
+        except Exception as exc:
+            log.warning("html_listing_parse_error", error=str(exc))
+            return IngestResult(
+                status=IngestStatus.PARSE_ERROR,
+                error=f"listing parse: {type(exc).__name__}: {exc}",
+            )
+
+        article_urls = list(dict.fromkeys(raw_urls))
+        if not article_urls:
+            log.info("html_listing_empty")
+            return IngestResult(status=IngestStatus.OK, count=0)
+
+        # Phase 3: per-article fetch with Referer = source's configured value
+        # (typically the homepage). Failure isolation is the same shape as
+        # the httpx path: per-article exceptions log + skip + continue.
+        fetched_at = utcnow()
+        before_count = self._row_count()
+
+        for idx, article_url in enumerate(article_urls):
+            if idx > 0 and source.rate_limit_seconds > 0:
+                await self._sleep(float(source.rate_limit_seconds))
+
+            try:
+                resp = await gov_http.fetch(article_url, referer=referer)
+            except Exception as exc:  # curl_cffi exception family is broad
+                log.warning(
+                    "html_article_http_error",
+                    url=article_url,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+
+            if resp.status_code >= 400:
+                log.warning(
+                    "html_article_bad_status",
+                    url=article_url,
+                    status=resp.status_code,
+                )
+                continue
+
+            try:
+                self._persist_article(
+                    source, article_url, resp, fetched_at, config
+                )
+            except Exception as exc:
+                log.warning(
+                    "html_article_parse_error",
+                    url=article_url,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+
+        inserted = self._row_count() - before_count
+        log.info(
+            "html_ok",
+            inserted=inserted,
+            listing_urls=len(article_urls),
+            transport="gov_http",
+        )
+        return IngestResult(status=IngestStatus.OK, count=inserted)
+
+    async def _gov_http_get(
+        self,
+        gov_http: GovHttpFetcher,
+        url: str,
+        *,
+        referer: str | None,
+    ) -> GovHttpResponse | IngestResult:
+        """One-shot gov_http GET; same contract as :meth:`_http_get`."""
+        try:
+            response = await gov_http.fetch(url, referer=referer)
+        except Exception as exc:
+            # curl_cffi exception hierarchy is not stable enough to switch
+            # on TimeoutException vs others reliably across versions · we
+            # report HTTP_ERROR with the type name so the operator can
+            # disambiguate from the log without a second probe.
+            return IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error=f"gov_http {type(exc).__name__}: {exc}",
+            )
+        if response.status_code >= 400:
+            return IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error=f"HTTP {response.status_code}",
+            )
+        return response
+
     # ── HTTP helpers ────────────────────────────────────────────────────
 
     async def _http_get(
@@ -417,7 +571,7 @@ class HtmlIngester:
         self,
         source: Source,
         url: str,
-        response: httpx.Response,
+        response: httpx.Response | GovHttpResponse,
         fetched_at: datetime,
         config: SelectorConfig,
     ) -> None:
@@ -427,6 +581,11 @@ class HtmlIngester:
         failure per-article. Successful inserts return ``None``; the caller
         derives the inserted-count from the table's ``COUNT(*)`` delta to
         match the rss.py pattern.
+
+        ``response`` accepts both :class:`httpx.Response` (non-gov path) and
+        :class:`GovHttpResponse` (gov path) · the function only relies on
+        ``.content`` / ``.status_code`` / ``.headers.get`` which both shapes
+        provide. Header keys are looked up lowercase; both shapes normalise.
         """
         tree = HTMLParser(response.content)
         canonical_ts, method = extract_canonical_timestamp(

@@ -359,3 +359,176 @@ class TestParserInjection:
 def _row_count(conn: duckdb.DuckDBPyConnection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM raw_articles").fetchone()
     return int(row[0]) if row else 0
+
+
+# ── Gov-source path (2026-05-25 · curl_cffi adoption) ──────────────────────
+
+
+from musahit.ingest.gov_http import (  # noqa: E402
+    GOV_BOOTSTRAP_URL,
+    GOV_REFERER,
+    FakeGovHttpFetcher,
+)
+
+
+class TestPdfMagicByteCheck:
+    """``_process_pdf`` rejects responses whose body isn't a PDF.
+
+    Two threat models:
+
+    1. The Akamai CDN can serve an HTML challenge page with
+       ``content-type: application/pdf`` if the curl_cffi session is
+       dirty. Without the magic-byte check that bytes would be persisted
+       and surface as a normalize-stage failure days later.
+    2. An accidentally-truncated upstream response could land here too;
+       failing fast keeps the diagnostic close to the cause.
+
+    The existing ``TestCorruptedPdf`` case still exercises the
+    pdfplumber-error path because that fixture starts with ``%PDF-`` ·
+    only the trailing bytes are garbage. This class drives the
+    new check with payloads that do NOT start with ``%PDF``.
+    """
+
+    async def test_html_challenge_page_returned_as_pdf_raises_parse_error(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        # HTML page returned with content-type=application/pdf (Akamai
+        # challenge shape) · no %PDF magic prefix.
+        challenge = (
+            b"<!doctype html><html><head><title>Access denied</title></head>"
+            b"<body><h1>You must enable JavaScript</h1></body></html>"
+        )
+        routes = {today_url: (challenge, 200)}
+        client = _make_client(_route_responder(routes))
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db, client=client, target_date=TARGET_DATE
+        ).fetch(source)
+
+        # Main PDF fails magic-byte check → PARSE_ERROR.
+        assert result.status is IngestStatus.PARSE_ERROR
+        assert "not a PDF" in (result.error or "")
+        assert _row_count(ingest_db) == 0
+
+    async def test_main_pdf_with_magic_bytes_passes_check(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Re-exercise the happy path through the new code path · confirms
+        # the magic-byte check doesn't reject real PDFs.
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        routes = {today_url: (SAMPLE_PDF, 200)}
+        client = _make_client(_route_responder(routes))
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db, client=client, target_date=TARGET_DATE
+        ).fetch(source)
+        assert result.status is IngestStatus.OK
+        assert result.count == 4
+
+    async def test_non_pdf_mukerrer_is_logged_and_skipped(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """A Mükerrer supplement that returns non-PDF bytes does NOT abort
+        the main edition's data · per the existing parse-error isolation
+        between main vs supplement."""
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        mukerrer_1_url = _build_pdf_url(TARGET_DATE, mukerrer=1)
+        routes = {
+            today_url: (SAMPLE_PDF, 200),
+            # Mükerrer returns HTML instead of a PDF.
+            mukerrer_1_url: (b"<html>oops</html>", 200),
+        }
+        client = _make_client(_route_responder(routes))
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db, client=client, target_date=TARGET_DATE
+        ).fetch(source)
+        assert result.status is IngestStatus.OK
+        # Main edition's 4 items persisted; supplement's bad bytes skipped.
+        assert result.count == 4
+
+
+class TestResmiGazeteGovHttpPath:
+    """End-to-end via the injected gov_http fetcher (no httpx client)."""
+
+    async def test_gov_http_used_when_no_client_injected(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        fake_gov = FakeGovHttpFetcher(
+            routes={today_url: (SAMPLE_PDF, 200, {"content-type": "application/pdf"})}
+        )
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            target_date=TARGET_DATE,
+            # NOTE · no httpx client passed; gov_http path takes over.
+        ).fetch(source)
+
+        assert result.status is IngestStatus.OK
+        assert result.count == 4
+        # The PDF GET was made with the configured Referer.
+        gov_calls = [c for c in fake_gov.calls if c[0] == today_url]
+        assert gov_calls and gov_calls[0][1] == GOV_REFERER["resmi_gazete"]
+
+    async def test_gov_http_404_falls_back_to_yesterday(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        yesterday_url = _build_pdf_url(YESTERDAY, mukerrer=0)
+        fake_gov = FakeGovHttpFetcher(
+            routes={
+                # today is not in routes → FakeGovHttpFetcher returns 404
+                yesterday_url: (SAMPLE_PDF, 200, None),
+            }
+        )
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            target_date=TARGET_DATE,
+        ).fetch(source)
+
+        assert result.status is IngestStatus.OK
+        # Both URLs were probed.
+        attempted = [c[0] for c in fake_gov.calls]
+        assert today_url in attempted
+        assert yesterday_url in attempted
+
+    async def test_gov_http_non_pdf_response_raises_parse_error(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Akamai-style HTML-challenge body via the gov path · same
+        magic-byte check fires (the check lives in ``_process_pdf`` which
+        both paths share)."""
+        source = _gazette_source()
+        today_url = _build_pdf_url(TARGET_DATE, mukerrer=0)
+        fake_gov = FakeGovHttpFetcher(
+            routes={today_url: (b"<html>nope</html>", 200, None)}
+        )
+
+        result = await ResmiGazeteIngester(
+            conn=ingest_db,
+            gov_http=fake_gov,
+            target_date=TARGET_DATE,
+        ).fetch(source)
+        assert result.status is IngestStatus.PARSE_ERROR
+        assert "not a PDF" in (result.error or "")
+
+    async def test_bootstrap_referer_config_pinned(self) -> None:
+        # Pin the production config · sources.py & gov_http.py must agree
+        # on resmi_gazete's bootstrap + referer URL.
+        assert (
+            GOV_BOOTSTRAP_URL["resmi_gazete"]
+            == "https://www.resmigazete.gov.tr/"
+        )
+        assert (
+            GOV_REFERER["resmi_gazete"] == "https://www.resmigazete.gov.tr/"
+        )

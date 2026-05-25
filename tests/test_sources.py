@@ -68,7 +68,8 @@ class TestSourceDataclass:
 
 class TestAllSources:
     def test_total_count(self) -> None:
-        assert len(SOURCES) == 37
+        # 36 (was 37 before danistay dropped 2026-05-25 · see sources.py).
+        assert len(SOURCES) == 36
 
     def test_tier_counts(self) -> None:
         news = [s for s in SOURCES if s.tier is Tier.NEWS]
@@ -77,7 +78,8 @@ class TestAllSources:
         social = [s for s in SOURCES if s.tier is Tier.SOCIAL]
         assert len(news) == 24
         assert len(markets) == 6
-        assert len(gov) == 6
+        # GOV: 5 (was 6 before danistay dropped · see sources.py).
+        assert len(gov) == 5
         assert len(social) == 1
 
     def test_is_tuple(self) -> None:
@@ -201,7 +203,8 @@ class TestHelpers:
     def test_get_sources_by_tier_gov_count(self) -> None:
         result = get_sources_by_tier(Tier.GOV)
         assert isinstance(result, tuple)
-        assert len(result) == 6
+        # 5 (was 6 before danistay dropped 2026-05-25 · see sources.py).
+        assert len(result) == 5
 
     def test_get_sources_by_tier_news_count(self) -> None:
         assert len(get_sources_by_tier(Tier.NEWS)) == 24

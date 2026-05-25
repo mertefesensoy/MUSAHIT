@@ -42,6 +42,14 @@ from musahit.common.time import to_utc_naive, tr_local_date, utcnow
 from musahit.common.types import IngestStatus
 from musahit.ingest import USER_AGENT, IngestResult
 from musahit.ingest.gazette_parsing import GazetteItem, parse_gazette_pdf
+from musahit.ingest.gov_http import (
+    PDF_MAGIC_BYTES,
+    SOURCE_IDS_USING_GOV_HTTP,
+    GovHttpFetcher,
+    GovHttpResponse,
+    make_gov_http_fetcher_for,
+    referer_for,
+)
 from musahit.ingest.sources import Source
 
 _log = get_logger("musahit.ingest.resmi_gazete")
@@ -95,6 +103,7 @@ class ResmiGazeteIngester:
         parse_pdf: ParsePdfFn | None = None,
         max_mukerrer: int = DEFAULT_MAX_MUKERRER,
         sleep: SleepFn | None = None,
+        gov_http: GovHttpFetcher | None = None,
     ) -> None:
         self._conn = conn
         self._client = client
@@ -105,8 +114,31 @@ class ResmiGazeteIngester:
         # _sleep is currently unused (no in-source rate limiting) but kept on
         # the constructor for symmetry with html.py and future use.
         self._sleep = sleep
+        # gov_http is the curl_cffi-backed fetcher for ``resmi_gazete``. The
+        # 2026-05-25 spike showed direct httpx GETs on the daily PDF URL
+        # consistently fail (Akamai TLS-fingerprint rejection); curl_cffi
+        # with firefox133 impersonation + homepage bootstrap + Referer
+        # header gets the full 15-20 MB file cleanly. ``client`` (httpx) is
+        # kept for tests that prefer ``MockTransport`` injection · the real
+        # production path is the gov_http branch.
+        self._gov_http = gov_http
 
     async def fetch(self, source: Source) -> IngestResult:
+        # resmi_gazete is gov-tagged; if the caller didn't inject a client
+        # (i.e. this is a real run, not a test) we route through gov_http.
+        # When ``client`` IS injected (test fixtures use MockTransport for
+        # the predictable httpx flow), we honour it: tests don't need the
+        # curl_cffi machinery to verify ingester logic.
+        if (
+            source.id in SOURCE_IDS_USING_GOV_HTTP
+            and self._client is None
+        ):
+            gov_http = self._gov_http or make_gov_http_fetcher_for(source.id)
+            try:
+                return await self._fetch_with_gov(gov_http, source)
+            finally:
+                if self._gov_http is None:
+                    await gov_http.close()
         if self._client is not None:
             return await self._fetch_with(self._client, source)
         async with httpx.AsyncClient(
@@ -207,12 +239,145 @@ class ResmiGazeteIngester:
         log.info("resmi_gazete_ok", inserted=inserted, date=main_date.isoformat())
         return IngestResult(status=IngestStatus.OK, count=inserted)
 
+    # ── Gov-source flow (curl_cffi via GovHttpFetcher) ──────────────────
+
+    async def _fetch_with_gov(
+        self, gov_http: GovHttpFetcher, source: Source
+    ) -> IngestResult:
+        """Same shape as :meth:`_fetch_with`, but routes through gov_http.
+
+        The fetcher's lazy bootstrap (configured via
+        :data:`musahit.ingest.gov_http.GOV_BOOTSTRAP_URL`) fires on the
+        first ``fetch`` call so the resmigazete.gov.tr homepage is visited
+        before any PDF request. Each PDF GET sends the Referer header
+        (the homepage) so the Akamai layer accepts it as a "page → PDF"
+        navigation rather than a bare deep link.
+        """
+        log = _log.bind(source_id=source.id, transport="gov_http")
+
+        target_date = self._target_date or tr_local_date()
+        candidates = [target_date, target_date - timedelta(days=1)]
+        referer = referer_for(source.id)
+
+        main_response: GovHttpResponse | None = None
+        main_date: date | None = None
+        last_error: IngestResult | None = None
+
+        for candidate_date in candidates:
+            url = _build_pdf_url(candidate_date, mukerrer=0)
+            result = await self._gov_http_get(gov_http, url, referer=referer)
+            if isinstance(result, IngestResult):
+                last_error = result
+                log.info(
+                    "resmi_gazete_main_miss",
+                    date=candidate_date.isoformat(),
+                    status=result.status.value,
+                )
+                continue
+            main_response = result
+            main_date = candidate_date
+            break
+
+        if main_response is None or main_date is None:
+            return last_error or IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error="all candidate dates returned non-200",
+            )
+
+        fetched_at = utcnow()
+        before_count = self._row_count()
+        try:
+            self._process_pdf(
+                source,
+                main_response,
+                main_date,
+                mukerrer=0,
+                fetched_at=fetched_at,
+                log=log,
+            )
+        except Exception as exc:
+            log.warning(
+                "resmi_gazete_main_parse_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return IngestResult(
+                status=IngestStatus.PARSE_ERROR,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        for mukerrer_n in range(1, self._max_mukerrer + 1):
+            url = _build_pdf_url(main_date, mukerrer=mukerrer_n)
+            result = await self._gov_http_get(gov_http, url, referer=referer)
+            if isinstance(result, IngestResult):
+                log.info(
+                    "resmi_gazete_mukerrer_stop",
+                    mukerrer=mukerrer_n,
+                    status=result.status.value,
+                )
+                break
+            try:
+                self._process_pdf(
+                    source,
+                    result,
+                    main_date,
+                    mukerrer=mukerrer_n,
+                    fetched_at=fetched_at,
+                    log=log,
+                )
+            except Exception as exc:
+                log.warning(
+                    "resmi_gazete_mukerrer_parse_error",
+                    mukerrer=mukerrer_n,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+        inserted = self._row_count() - before_count
+        log.info(
+            "resmi_gazete_ok", inserted=inserted, date=main_date.isoformat()
+        )
+        return IngestResult(status=IngestStatus.OK, count=inserted)
+
+    async def _gov_http_get(
+        self,
+        gov_http: GovHttpFetcher,
+        url: str,
+        *,
+        referer: str | None,
+    ) -> GovHttpResponse | IngestResult:
+        """One-shot gov_http GET; same contract as :meth:`_http_get`.
+
+        A 404 here is *expected* (date probing) → ``HTTP_ERROR`` translates
+        to "try next candidate" in :meth:`_fetch_with_gov`. Network errors
+        from curl_cffi can manifest as a wide range of exception types
+        across versions; we catch broadly and report HTTP_ERROR with the
+        type name so logs distinguish timeout-shaped from connect-shaped
+        failures without a second probe.
+        """
+        try:
+            response = await gov_http.fetch(url, referer=referer)
+        except Exception as exc:
+            return IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error=f"gov_http {type(exc).__name__}: {exc}",
+            )
+        if response.status_code == 404:
+            return IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error="HTTP 404",
+            )
+        if response.status_code >= 400:
+            return IngestResult(
+                status=IngestStatus.HTTP_ERROR,
+                error=f"HTTP {response.status_code}",
+            )
+        return response
+
     # ── PDF processing ──────────────────────────────────────────────────
 
     def _process_pdf(
         self,
         source: Source,
-        response: httpx.Response,
+        response: httpx.Response | GovHttpResponse,
         publication_date: date,
         mukerrer: int,
         fetched_at: datetime,
@@ -225,7 +390,40 @@ class ResmiGazeteIngester:
         ``PARSE_ERROR`` (main edition) or merely log them (Mükerrer
         supplement). The decision lives one level up; this method stays
         single-purpose.
+
+        The ``%PDF`` magic-byte check (added 2026-05-25 alongside the
+        curl_cffi adoption) is defensive against two failure modes:
+
+        1. The Akamai CDN occasionally serves a JS-challenge HTML page
+           with ``content-type: application/pdf`` when the curl_cffi
+           session is dirty (cookies expired, impersonation drift). Without
+           the magic-byte check the bytes flow into pdfplumber which
+           raises an opaque ``PDFSyntaxError``.
+        2. ``raw_articles.raw_content`` is later read by the normalize
+           stage's PDF extractor (`musahit/normalize/extractors/pdf.py`).
+           Persisting non-PDF bytes there masquerading as ``application/
+           pdf`` would surface as a normalize-stage failure days later;
+           failing fast here keeps the diagnostic close to the cause.
+
+        ``response`` accepts both :class:`httpx.Response` and
+        :class:`GovHttpResponse` — the function only relies on
+        ``.content`` / ``.status_code`` / ``.headers``.
         """
+        # Defensive · validate PDF magic before invoking pdfplumber. The
+        # 4-byte prefix is required by ISO 32000 (PDF spec); anything
+        # else is either an HTML error page returned with status 200 or
+        # outright corruption. Raise a clear error so the caller's
+        # try/except surfaces it cleanly (PARSE_ERROR for main edition;
+        # logged + skipped for Mükerrer supplement).
+        if not response.content.startswith(PDF_MAGIC_BYTES):
+            preview = bytes(response.content[:120]).decode(
+                "utf-8", errors="replace"
+            )
+            raise ValueError(
+                "resmi_gazete response is not a PDF · "
+                f"first bytes do not match {PDF_MAGIC_BYTES!r}; "
+                f"preview={preview!r}"
+            )
         items = self._parse_pdf(response.content, publication_date)
 
         canonical_ts = to_utc_naive(

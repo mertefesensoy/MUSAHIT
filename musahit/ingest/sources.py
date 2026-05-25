@@ -2,12 +2,17 @@
 # FILE-PROTECTED · musahit/ingest/sources.py
 # Modifications require an ADR amendment + explicit operator override.
 # See BOOTSTRAP.md § File protection list, ADR-003, and ADR-013.
+# Operator override 2026-05-25 · danistay dropped (architecturally
+# unreachable · see _GOV comment block below).
 # ============================================================================
 """Static source registry for MÜŞAHİT.
 
-Defines all 37 configured sources with their band, tier, kind, URL, and
+Defines all 36 configured sources with their band, tier, kind, URL, and
 operational metadata. Two decisions in ADR-003 are superseded by ADR-013:
 bloomberg_ht.band is CENTRIST (not INTERNATIONAL) and x_stub is not created.
+One source (``danistay``) was dropped 2026-05-25 per the curl_cffi roadmap:
+its listing page is JS-rendered (selectolax cannot parse it) and the
+ingester would need a Playwright back-end the project doesn't yet ship.
 
 Exports
 -------
@@ -387,7 +392,24 @@ _MARKETS: tuple[Source, ...] = (
     ),
 )
 
-# ─── GOV ······················································· 6 sources ───
+# ─── GOV ······················································· 5 sources ───
+#
+# danistay was dropped 2026-05-25 · architecturally unreachable.
+# The Danıştay press-release listing renders entirely in JavaScript:
+# the HTML body returned to a non-JS client (httpx OR curl_cffi alike)
+# contains the navigation chrome but no article links · selectolax then
+# extracts zero URLs and the ingester would report OK with count=0 every
+# night. Fixing this would require Playwright (or another headless-
+# browser engine) to evaluate the page's JS before extraction · that is
+# a strictly larger architectural change than the curl_cffi adoption
+# the rest of the gov sources need. Re-add the entry when JS-rendering
+# becomes a project dependency.
+#
+# The curl_cffi adoption itself (the 2026-05-25 spike) confirmed that
+# anayasa_mahkemesi, cumhurbaskanligi (tccb.gov.tr), and yargitay are
+# reachable with firefox133 impersonation + session bootstrap + Referer;
+# those four (plus resmi_gazete and tbmm) remain in this tuple and route
+# through ``musahit.ingest.gov_http``.
 
 _GOV: tuple[Source, ...] = (
     Source(  # ★ VERIFIED — listing page; scraper constructs daily PDF URL
@@ -448,17 +470,9 @@ _GOV: tuple[Source, ...] = (
         fragility=Fragility.MEDIUM,
         notes="HTML scrape; yargitay.py targets press-release section",
     ),
-    Source(  # ○ HTML — Council of State
-        id="danistay",
-        display_name="Danıştay",
-        band=Band.PRIMARY_JUDICIAL,
-        tier=Tier.GOV,
-        kind=SourceKind.HTML,
-        url="https://www.danistay.gov.tr/",
-        rate_limit_seconds=15,
-        fragility=Fragility.MEDIUM,
-        notes="HTML scrape; danistay.py targets press-release section",
-    ),
+    # danistay (Council of State · Danıştay) was here · dropped 2026-05-25
+    # · architecturally unreachable without a JS-rendering back-end. See
+    # the comment block above _GOV for the full rationale.
 )
 
 # ─── SOCIAL ···················································· 1 source ───

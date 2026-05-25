@@ -131,14 +131,8 @@ SELECTORS: dict[str, SelectorConfig] = {
         body_selector="div.haber-detay, article",
         published_selector="span.tarih, time",
     ),
-    "danistay": SelectorConfig(
-        # TODO: verify against https://www.danistay.gov.tr/
-        listing_selector="div.haberler, main",
-        article_link_selector="a[href*='/haber/']",
-        title_selector="h1",
-        body_selector="div.haber-detay, article",
-        published_selector="span.tarih, time",
-    ),
+    # danistay's SelectorConfig was removed 2026-05-25 with the source itself
+    # · architecturally unreachable without a JS renderer · see sources.py.
 }
 
 

@@ -13,6 +13,13 @@ dependencies = [
     "pydantic-settings>=2.2",
     "duckdb>=0.10",
     "httpx>=0.27",
+    # curl_cffi: browser-impersonating HTTP client for *.gov.tr and similar
+    # CDNs that 403/RST on standard httpx (Akamai TLS-fingerprint defence).
+    # Wraps libcurl-impersonate; used by musahit.ingest.gov_http only.
+    "curl-cffi>=0.7",
+    # certifi: CA bundle for curl_cffi when system trust store is missing
+    # or out of date (Windows update lag on government CA chains).
+    "certifi>=2024.7",
     "feedparser>=6.0",
     "trafilatura>=1.9",
     "langdetect>=1.0.9",
