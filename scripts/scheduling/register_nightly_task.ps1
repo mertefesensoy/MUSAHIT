@@ -48,20 +48,20 @@ if (-not $IsAdmin) {
 }
 
 # ── Resolve pwsh.exe absolute path ─────────────────────────────────────────
-# The Microsoft Store install of PowerShell 7 places an "execution alias"
-# (a zero-byte AppX stub) under %LOCALAPPDATA%\Microsoft\WindowsApps\. This
-# alias works from an interactive shell but Task Scheduler cannot execute
-# it — the stub returns 0x80070002 ("system cannot find the file"). The real
-# Store binary lives under "C:\Program Files\WindowsApps\Microsoft.PowerShell_*\"
-# and works fine; we just need to resolve past the alias to the real EXE.
+# Two paths on Windows contain "WindowsApps" but only one is the problem:
+#   - alias stub      C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\pwsh.exe
+#   - real Store bin  C:\Program Files\WindowsApps\Microsoft.PowerShell_*\pwsh.exe
+# Both substring-match "WindowsApps". Only the first is unusable from Task
+# Scheduler (zero-byte AppX stub → 0x80070002). The real Store binary works
+# fine. Filter on the user-local alias subpath only so probe A keeps the
+# Store binary in the candidate set.
 # Probe order: MSI/winget install first, then Store binary, then error.
 
 $PwshExe = $null
 
-# Probe A: any pwsh.exe that is NOT a WindowsApps alias or Store package
-# (i.e. an MSI or winget install under Program Files\PowerShell\7\).
+# Probe A: any pwsh.exe that is NOT the user-local execution alias stub.
 $candidates = Get-Command pwsh.exe -All -ErrorAction SilentlyContinue |
-    Where-Object { $_.Source -notlike "*\WindowsApps\*" } |
+    Where-Object { $_.Source -notlike "*\AppData\Local\Microsoft\WindowsApps\*" } |
     Select-Object -First 1
 if ($candidates) {
     $PwshExe = $candidates.Source

@@ -775,6 +775,57 @@ class TestPipelineRunsLifecycle:
         assert row[0] == PipelineStatus.COMPLETED.value
         assert json.loads(row[1]) == list(STAGE_ORDER)
 
+    async def test_recovery_branch_skips_completed_row_with_full_stages_done(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        settings: Settings,
+    ) -> None:
+        """A COMPLETED row with full stages_done must NOT trigger the
+        ``pipeline_auto_complete_stuck_running`` WARNING. The for-loop
+        skip-completes every stage via the ``stage_skip_completed``
+        branch and the normal completion path marks COMPLETED."""
+        import structlog.testing
+
+        db.execute(
+            "INSERT INTO pipeline_runs (run_id, started_at, completed_at, "
+            "status, stages_done, counts, failed_stages) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                RUN_ID,
+                NOW,
+                datetime(2026, 5, 23, 1, 30, 0),
+                PipelineStatus.COMPLETED.value,
+                json.dumps(list(STAGE_ORDER)),
+                json.dumps({"articles": 200}),
+                json.dumps([]),
+            ],
+        )
+        stages = _all_success_stages()
+        orchestrator = Orchestrator(
+            db,
+            settings,
+            stage_factory=_make_factory(stages),
+            ollama=_RecordingOllama(),
+            timing_budgets=_FAST_BUDGETS,
+        )
+        with structlog.testing.capture_logs() as captured:
+            result = await orchestrator.run(run_id=RUN_ID)
+
+        assert result.status == PipelineStatus.COMPLETED.value
+        assert result.stages_completed == []
+        for stage in stages.values():
+            assert stage.calls == []
+        assert not any(
+            log.get("event") == "pipeline_auto_complete_stuck_running"
+            for log in captured
+        ), "recovery WARNING must not fire for an already-COMPLETED row"
+        row = db.execute(
+            "SELECT status, stages_done FROM pipeline_runs WHERE run_id = ?",
+            [RUN_ID],
+        ).fetchone()
+        assert row[0] == PipelineStatus.COMPLETED.value
+        assert json.loads(row[1]) == list(STAGE_ORDER)
+
     async def test_resume_auto_recovers_stuck_at_running_with_full_stages(
         self,
         db: duckdb.DuckDBPyConnection,

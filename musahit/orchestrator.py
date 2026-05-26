@@ -405,6 +405,14 @@ class Orchestrator:
             _NoOpOllamaManager() if dry_run else self._ollama
         )
 
+        # Capture the row's status BEFORE _upsert_run_row flips it to
+        # RUNNING · needed by the recovery branch to distinguish a
+        # genuinely-stuck RUNNING row from a re-invocation against an
+        # already-COMPLETED row.
+        pre_upsert_status = (
+            self._read_run_status(run_id) if not dry_run else None
+        )
+
         if dry_run:
             log.info("dry_run_mode_active")
         else:
@@ -428,20 +436,21 @@ class Orchestrator:
         terminal_set = False
 
         try:
-            # Auto-recovery for stuck-at-RUNNING rows. If yesterday's run
-            # completed every stage but the process died before
+            # Auto-recovery for stuck-at-RUNNING rows. Fires ONLY when
+            # the row was status=RUNNING (before _upsert_run_row flipped
+            # it) AND stages_done covers all 7 stages. This means the
+            # process died after every stage completed but before
             # _mark_run_completed fired (Windows reboot, Ctrl-C between
-            # asyncio await points), the row sits at status=RUNNING with
-            # all 7 stages in stages_done. Today's `pipeline run --date
-            # today` should immediately mark COMPLETED rather than
-            # treat the row as fresh work. Logged at WARNING so the
-            # operator notices and can investigate the underlying cause
-            # rather than relying on this masking the problem.
+            # asyncio await points). A re-invocation against an
+            # already-COMPLETED row with full stages_done does NOT
+            # trigger this branch · it falls through to the normal
+            # for-loop which skip-completes every stage.
             if (
                 not dry_run
                 and only_stage is None
                 and not force
                 and set(STAGE_ORDER).issubset(set(stages_done))
+                and pre_upsert_status == PipelineStatus.RUNNING.value
             ):
                 log.warning(
                     "pipeline_auto_complete_stuck_running",
@@ -703,6 +712,16 @@ class Orchestrator:
                 "UPDATE pipeline_runs SET status = ? WHERE run_id = ?",
                 [PipelineStatus.RUNNING.value, run_id],
             )
+
+    def _read_run_status(self, run_id: str) -> str | None:
+        """Return the status column for run_id, or None if no row."""
+        row = self._conn.execute(
+            "SELECT status FROM pipeline_runs WHERE run_id = ?",
+            [run_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return row[0]
 
     def _read_stages_done(self, run_id: str) -> list[str]:
         row = self._conn.execute(
