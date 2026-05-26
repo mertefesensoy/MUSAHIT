@@ -63,6 +63,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from musahit.common.config import get_settings  # noqa: E402,I001
+from musahit.common.db import open_connection  # noqa: E402
 
 
 DEFAULT_DB_PATH: Path = REPO_ROOT / "data" / "musahit.duckdb"
@@ -391,8 +392,7 @@ def main() -> int:
         return 2
 
     print(f"Opening DB at {db_path} (dry_run={args.dry_run})")
-    conn = duckdb.connect(str(db_path), read_only=args.dry_run)
-    try:
+    with open_connection(db_path, load_vss=True) as conn:
         # ── arc_20260523_0146 (recoverable) ────────────────────────────
         print()
         print(f"=== {ARC_RECOVERABLE} (recoverable from {ARC_RECOVERABLE_SOURCE_CLUSTER}) ===")
@@ -490,8 +490,6 @@ def main() -> int:
                         f"  {arc_id}: last_update_at={row[0]}, "
                         f"last_update_cluster_id={row[1]!r}"
                     )
-    finally:
-        conn.close()
     print()
     print("Done.")
     return 0
