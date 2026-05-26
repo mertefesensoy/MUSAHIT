@@ -143,7 +143,7 @@ The audio reads the voiced sections aloud in a calm Turkish voice. You can liste
 
 ## ❯ Deployment
 
-MÜŞAHİT runs on Windows. Specifically: one laptop, Windows 11, plugged in overnight, with a Task Scheduler entry that fires the pipeline at 01:00 TR-local. The pipeline takes ~7 minutes when nothing is on fire. The operator wakes at 07:00 and reads the briefing.
+MÜŞAHİT runs on Windows. Specifically: one laptop, Windows 11, plugged in overnight, with a Task Scheduler entry that fires the pipeline at 02:00 TR-local (wakes from sleep automatically). The pipeline takes ~7 minutes when nothing is on fire. The operator wakes at 07:00 and reads the briefing. Scheduler setup: [`docs/operations/scheduler-setup.md`](docs/operations/scheduler-setup.md).
 
 **Why one laptop?** Because the system doesn't need more. The bottleneck is LLM inference (Qwen2.5 scoring ~89 clusters takes ~5 minutes), not throughput. A laptop with 16GB RAM and Ollama running locally is enough. No cloud costs. No external dependencies beyond the news sources themselves. No keys leaked. No data leaving the device.
 

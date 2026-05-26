@@ -270,6 +270,23 @@ class TestCurlCffiGovHttpFetcherBehavior:
 # ── TestProtocolConformance ───────────────────────────────────────────────
 
 
+class TestResolveCaBundle:
+    """Direct tests for ``_resolve_ca_bundle`` — the method whose certifi
+    default caused the 2026-05-26 production SSL failures."""
+
+    def test_default_returns_true(self) -> None:
+        fetcher = CurlCffiGovHttpFetcher()
+        assert fetcher._resolve_ca_bundle() is True
+
+    def test_explicit_path_is_honoured(self) -> None:
+        fetcher = CurlCffiGovHttpFetcher(ca_bundle="/custom/ca.pem")
+        assert fetcher._resolve_ca_bundle() == "/custom/ca.pem"
+
+    def test_false_disables_verification(self) -> None:
+        fetcher = CurlCffiGovHttpFetcher(ca_bundle=False)
+        assert fetcher._resolve_ca_bundle() is False
+
+
 class TestProtocolConformance:
     def test_fake_implements_protocol(self) -> None:
         assert isinstance(FakeGovHttpFetcher(), GovHttpFetcher)

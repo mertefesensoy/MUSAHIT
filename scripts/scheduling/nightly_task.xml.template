@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!--
+  MUSAHIT Nightly Pipeline — Task Scheduler XML template.
+
+  Placeholders (substituted by register_nightly_task.ps1):
+    {{PWSH_EXE}}        Absolute path to pwsh.exe (NOT a WindowsApps alias)
+    {{PROJECT_ROOT}}    Project directory (e.g. C:\Users\...\MUSAHIT)
+    {{RUN_SCRIPT}}      Full path to run_nightly.ps1
+    {{USER_ID}}         Windows user principal (DOMAIN\user or MACHINE\user)
+    {{LOG_DIR}}         Full path to the nightly log directory
+    {{START_BOUNDARY}}  ISO-8601 date for first trigger (computed at registration)
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>MUSAHIT nightly pipeline run. Fires at 02:00 Turkey local, wakes from sleep, writes briefing to disk. Logs: {{LOG_DIR}}</Description>
+    <URI>\MUSAHIT_Nightly</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>{{START_BOUNDARY}}</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <UserId>{{USER_ID}}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>true</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <Command>{{PWSH_EXE}}</Command>
+      <Arguments>-NonInteractive -ExecutionPolicy Bypass -File "{{RUN_SCRIPT}}" -LogDir "{{LOG_DIR}}"</Arguments>
+      <WorkingDirectory>{{PROJECT_ROOT}}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

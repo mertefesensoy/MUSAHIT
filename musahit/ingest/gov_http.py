@@ -188,13 +188,11 @@ class CurlCffiGovHttpFetcher:
     ``_bootstrapped_urls`` and returns immediately). Each call wraps the
     blocking ``Session.get`` in :func:`asyncio.to_thread`.
 
-    On Windows the system trust store can lag on freshly-renewed gov.tr
-    certificates. Passing ``ca_bundle`` (defaults to ``certifi.where()``)
-    routes verification through the certifi bundle, which tracks Mozilla
-    NSS root updates and ships current with the package. Set
-    ``verify=False`` (anti-pattern) via constructor only if absolutely
-    necessary — currently the certifi bundle is enough for every probed
-    source.
+    Certificate verification defaults to curl-impersonate's built-in
+    BoringSSL CA store (``verify=True``), which includes the Mozilla NSS
+    roots and is validated by the 2026-05-25 spike against every probed
+    ``*.gov.tr`` origin. Pass ``ca_bundle`` (str path or ``False``) via
+    the constructor only if you need to override this default.
     """
 
     def __init__(
@@ -227,11 +225,16 @@ class CurlCffiGovHttpFetcher:
         return self._session
 
     def _resolve_ca_bundle(self) -> str | bool:
-        """Return the verify argument to pass to curl_cffi."""
-        if self._ca_bundle is None:
-            import certifi
+        """Return the ``verify`` argument to pass to curl_cffi.
 
-            return certifi.where()
+        Default (``ca_bundle is None``): return ``True`` so curl_cffi
+        uses curl-impersonate's built-in BoringSSL CA store — the same
+        store the 2026-05-25 spike used successfully.  Pass an explicit
+        ``ca_bundle`` (str path or ``False``) only if you need to
+        override the built-in store.
+        """
+        if self._ca_bundle is None:
+            return True
         return self._ca_bundle
 
     async def bootstrap(self, url: str) -> None:
