@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
-from musahit.writer.validator import validate_briefing_markdown
+from musahit.writer.validator import validate_briefing_markdown, validate_section
 
 
 def _valid_skeleton() -> str:
@@ -114,3 +114,30 @@ class TestPlaceholderEchoRejected:
         match the substring guard)."""
         errors = validate_briefing_markdown(_valid_skeleton())
         assert not any("unfilled template placeholder" in e for e in errors)
+
+
+class TestValidateSection:
+    def test_validate_section_accepts_valid_block(self) -> None:
+        text = f"{TEMPLATE_SECTIONS[0].marker}\n\nİçerik buraya gelir.\n"
+        assert validate_section(text, 0) is True
+
+    def test_validate_section_rejects_missing_marker(self) -> None:
+        text = "Some prose without a marker.\nMore content.\n"
+        assert validate_section(text, 0) is False
+
+    def test_validate_section_rejects_wrong_marker(self) -> None:
+        text = f"{TEMPLATE_SECTIONS[1].marker}\n\nİçerik.\n"
+        assert validate_section(text, 0) is False
+
+    def test_validate_section_rejects_multiple_markers(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[0].marker}\n\n"
+            f"İçerik.\n\n"
+            f"{TEMPLATE_SECTIONS[1].marker}\n\n"
+            f"Başka içerik.\n"
+        )
+        assert validate_section(text, 0) is False
+
+    def test_validate_section_rejects_empty_content(self) -> None:
+        text = f"{TEMPLATE_SECTIONS[0].marker}\n\n"
+        assert validate_section(text, 0) is False

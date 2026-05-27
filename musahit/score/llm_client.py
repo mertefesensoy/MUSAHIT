@@ -39,6 +39,17 @@ class LlmClient(Protocol):
         max_tokens: int = ...,
     ) -> str: ...
 
+    async def generate_with_prefill(
+        self,
+        system: str,
+        user: str,
+        prefill: str,
+        *,
+        model: str = ...,
+        temperature: float = ...,
+        max_tokens: int = ...,
+    ) -> str: ...
+
 
 # ── Ollama implementation ──────────────────────────────────────────────────
 
@@ -90,6 +101,27 @@ class OllamaLlmClient:
                 client, prompt, model, temperature, max_tokens
             )
 
+    async def generate_with_prefill(
+        self,
+        system: str,
+        user: str,
+        prefill: str,
+        *,
+        model: str = DEFAULT_WORKER_MODEL,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> str:
+        if self._injected_client is not None:
+            return await self._call_chat(
+                self._injected_client, system, user, prefill,
+                model, temperature, max_tokens,
+            )
+        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            return await self._call_chat(
+                client, system, user, prefill,
+                model, temperature, max_tokens,
+            )
+
     async def _call(
         self,
         client: httpx.AsyncClient,
@@ -114,6 +146,37 @@ class OllamaLlmClient:
         response.raise_for_status()
         data: dict[str, Any] = response.json()
         return data.get("response", "")
+
+    async def _call_chat(
+        self,
+        client: httpx.AsyncClient,
+        system: str,
+        user: str,
+        prefill: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        response = await client.post(
+            f"{self._base_url}/api/chat",
+            json={
+                "model": model,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": prefill},
+                ],
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                },
+            },
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        return data.get("message", {}).get("content", "")
 
 
 # ── Fake (testing) implementation ──────────────────────────────────────────
@@ -146,6 +209,7 @@ class FakeLlmClient:
         self._responder = responder
         self._default = default
         self._call_log: list[str] = []
+        self._prefill_log: list[str] = []
         self._attempts_per_prompt: dict[str, int] = {}
 
     async def generate(
@@ -168,6 +232,21 @@ class FakeLlmClient:
                 return response
         return self._default
 
+    async def generate_with_prefill(
+        self,
+        system: str,
+        user: str,
+        prefill: str,
+        *,
+        model: str = DEFAULT_WORKER_MODEL,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> str:
+        self._prefill_log.append(prefill)
+        return await self.generate(
+            user, model=model, temperature=temperature, max_tokens=max_tokens
+        )
+
     @property
     def call_count(self) -> int:
         return len(self._call_log)
@@ -175,6 +254,10 @@ class FakeLlmClient:
     @property
     def calls(self) -> list[str]:
         return list(self._call_log)
+
+    @property
+    def prefill_calls(self) -> list[str]:
+        return list(self._prefill_log)
 
 
 def _prompt_key(prompt: str) -> str:

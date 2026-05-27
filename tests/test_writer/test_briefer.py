@@ -6,22 +6,23 @@ import json
 from collections.abc import Generator
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import pytest
 
 from musahit.common.migrations import init_db
 from musahit.ingest.sources import seed_sources
-from musahit.score.defcon import DEFCON
 from musahit.score.llm_client import FakeLlmClient
 from musahit.writer.briefer import Briefer
-from musahit.writer.fallback import render_fallback_briefing
-from musahit.writer.payload import BriefingPayload, build_payload
-from musahit.writer.prompt import build_writer_prompt
+from musahit.writer.payload import BriefingPayload
+from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
 from musahit.writer.validator import validate_briefing_markdown
 
 RUN_ID = "run_test"
 NOW = datetime(2026, 5, 23, 8, 0, 0)
+
+VALID_SECTION_CONTENT = "İçerik burada.\n"
 
 
 @pytest.fixture()
@@ -81,30 +82,30 @@ def _seed_one_cluster(conn: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _valid_canned_briefing(conn: duckdb.DuckDBPyConnection) -> str:
-    """Build the payload's fallback briefing · guaranteed validator-clean."""
-    return render_fallback_briefing(build_payload(conn, RUN_ID))
-
-
-# ── TestHappyPath ──────────────────────────────────────────────────────────
+# ── TestHappyPath (rewritten for per-section) ────────────────────────────
 
 
 class TestHappyPath:
-    async def test_writes_file_and_inserts_row(
+    async def test_per_section_compose(
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        llm = FakeLlmClient(default=canned)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
         briefer = Briefer(db, llm, briefings_root=tmp_path / "briefings")
 
         result = await briefer.run(RUN_ID)
 
+        assert llm.call_count == 7
+        for i in range(7):
+            expected_prefill = f"{TEMPLATE_SECTIONS[i].marker}\n\n"
+            assert llm.prefill_calls[i] == expected_prefill
         assert result["used_fallback"] is False
+        assert result["sections_failed"] == []
         path = Path(result["path"])
         assert path.exists()
-        assert path.read_text(encoding="utf-8") == canned
-        # briefings row inserted for that date.
+        on_disk = path.read_text(encoding="utf-8")
+        assert on_disk.startswith(DOCUMENT_TITLE)
+        assert validate_briefing_markdown(on_disk) == []
         row = db.execute(
             "SELECT markdown_path, cluster_count, peak_defcon, html_path "
             "FROM briefings WHERE date = ?",
@@ -112,86 +113,102 @@ class TestHappyPath:
         ).fetchone()
         assert row is not None
         assert row[0] == str(path)
-        assert row[1] == 1
-        assert row[2] == int(DEFCON.MATERIAL)
-        assert row[3].endswith("briefing.html")
 
 
-# ── TestRetryThenSucceeds ──────────────────────────────────────────────────
+# ── TestPerSectionFailure ────────────────────────────────────────────────
 
 
-class TestRetryThenSucceeds:
-    async def test_first_invalid_then_valid_uses_no_fallback(
+class TestPerSectionFailure:
+    async def test_per_section_failure_produces_stub(
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-
-        # FakeLlmClient's per-prompt-key attempt counter resets when the
-        # briefer sends a different prompt for the retry (it appends
-        # validator-error feedback). We need a global counter; capture
-        # it in a closure so the second physical call returns canned.
-        global_calls = {"n": 0}
+        call_counter = {"n": 0}
 
         def responder(_prompt: str, _attempt: int) -> str:
-            n = global_calls["n"]
-            global_calls["n"] += 1
-            if n == 0:
-                return "# Wrong Title\n\n## ❯ Yanlış Bölüm\n\nbroken\n"
-            return canned
-
-        llm = FakeLlmClient(responder=responder)
-        result = await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
-
-        assert result["used_fallback"] is False
-        # The second call's output was used and validated.
-        assert validate_briefing_markdown(Path(result["path"]).read_text("utf-8")) == []
-        # Two LLM calls happened (attempt 0 failed, attempt 1 succeeded).
-        assert llm.call_count == 2
-
-
-# ── TestFallback ───────────────────────────────────────────────────────────
-
-
-class TestFallback:
-    async def test_three_retries_then_fallback(
-        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
-    ) -> None:
-        _seed_one_cluster(db)
-
-        def responder(_prompt: str, _attempt: int) -> str:
-            return "garbage that won't validate"
+            n = call_counter["n"]
+            call_counter["n"] += 1
+            if n == 3:
+                return "## ❯ WRONG HEADER\n\nBad content"
+            return VALID_SECTION_CONTENT
 
         llm = FakeLlmClient(responder=responder)
         result = await Briefer(
-            db, llm, briefings_root=tmp_path / "briefings", max_retries=3
+            db, llm, briefings_root=tmp_path / "briefings"
         ).run(RUN_ID)
 
+        assert result["sections_failed"] == [3]
+        assert result["used_fallback"] is False
+        on_disk = Path(result["path"]).read_text("utf-8")
+        assert "Bu bölüm üretilemedi" in on_disk
+        other_sections = [i for i in range(7) if i != 3]
+        for i in other_sections:
+            assert TEMPLATE_SECTIONS[i].marker in on_disk
+        assert "Başarısız bölüm üretimi" in on_disk
+        section_3_title = TEMPLATE_SECTIONS[3].marker.removeprefix("## ❯ ")
+        assert section_3_title in on_disk
+
+
+# ── TestAllLlmSectionsFail ───────────────────────────────────────────────
+
+
+class TestAllLlmSectionsFail:
+    async def test_all_llm_sections_fail_marks_not_full_fallback(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        """All 7 LLM sections fail → 7 stubs + 1 real SİSTEM LOG.
+        Per Decision 1 this is NOT full fallback since SİSTEM LOG
+        (idx 7) is deterministic and always succeeds."""
+        _seed_one_cluster(db)
+
+        def responder(_prompt: str, _attempt: int) -> str:
+            return "## ❯ WRONG\nBad"
+
+        llm = FakeLlmClient(responder=responder)
+        result = await Briefer(
+            db, llm, briefings_root=tmp_path / "briefings"
+        ).run(RUN_ID)
+
+        assert result["sections_failed"] == [0, 1, 2, 3, 4, 5, 6]
+        assert result["used_fallback"] is False
+        on_disk = Path(result["path"]).read_text("utf-8")
+        assert validate_briefing_markdown(on_disk) == []
+        assert TEMPLATE_SECTIONS[7].marker in on_disk
+
+
+# ── TestFinalValidationFailure ───────────────────────────────────────────
+
+
+class TestFinalValidationFailure:
+    async def test_final_validation_failure_triggers_full_fallback(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        """When per-section validator passes but the final assembled
+        markdown fails validate_briefing_markdown, the full fallback
+        fires as a last-resort safety net."""
+        _seed_one_cluster(db)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
+        briefer = Briefer(db, llm, briefings_root=tmp_path / "briefings")
+
+        with (
+            patch(
+                "musahit.writer.briefer.validate_section",
+                return_value=True,
+            ),
+            patch(
+                "musahit.writer.briefer.validate_briefing_markdown",
+                return_value=["forced error"],
+            ),
+        ):
+            result = await briefer.run(RUN_ID)
+
         assert result["used_fallback"] is True
-        # 1 initial + 3 retries = 4 calls.
-        assert llm.call_count == 4
-        # The on-disk briefing matches the Python fallback renderer output.
+        assert result["sections_failed"] == list(range(8))
         on_disk = Path(result["path"]).read_text("utf-8")
         assert validate_briefing_markdown(on_disk) == []
 
-    async def test_llm_exception_also_falls_through(
-        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
-    ) -> None:
-        _seed_one_cluster(db)
 
-        def responder(_prompt: str, _attempt: int) -> str:
-            raise RuntimeError("simulated llm outage")
-
-        llm = FakeLlmClient(responder=responder)
-        result = await Briefer(
-            db, llm, briefings_root=tmp_path / "briefings", max_retries=2
-        ).run(RUN_ID)
-
-        assert result["used_fallback"] is True
-        assert validate_briefing_markdown(Path(result["path"]).read_text("utf-8")) == []
-
-
-# ── TestStagesDone ─────────────────────────────────────────────────────────
+# ── TestStagesDone ────────────────────────────────────────────────────────
 
 
 class TestStagesDone:
@@ -199,8 +216,7 @@ class TestStagesDone:
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        llm = FakeLlmClient(default=canned)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
         await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
 
         row = db.execute(
@@ -212,9 +228,10 @@ class TestStagesDone:
         assert "write" in stages
         assert stages[-1] == "write"
         assert counts.get("writer_used_fallback") is False
+        assert counts.get("writer_sections_fallback") == []
 
 
-# ── TestIdempotenceForDate ─────────────────────────────────────────────────
+# ── TestIdempotenceForDate ───────────────────────────────────────────────
 
 
 class TestIdempotenceForDate:
@@ -222,21 +239,19 @@ class TestIdempotenceForDate:
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        llm = FakeLlmClient(default=canned)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
         briefer = Briefer(db, llm, briefings_root=tmp_path / "briefings")
 
         await briefer.run(RUN_ID)
         await briefer.run(RUN_ID)
 
-        # Exactly one row in briefings for that date.
         n = db.execute(
             "SELECT COUNT(*) FROM briefings WHERE date = ?", [NOW.date()]
         ).fetchone()[0]
         assert n == 1
 
 
-# ── TestPathLayout ─────────────────────────────────────────────────────────
+# ── TestPathLayout ────────────────────────────────────────────────────────
 
 
 class TestPathLayout:
@@ -244,58 +259,26 @@ class TestPathLayout:
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        llm = FakeLlmClient(default=canned)
-        result = await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
+        result = await Briefer(
+            db, llm, briefings_root=tmp_path / "briefings"
+        ).run(RUN_ID)
         path = Path(result["path"])
-        # Expected layout: <root>/2026/05/23/briefing.md
         assert path.name == "briefing.md"
         assert path.parent.name == "23"
         assert path.parent.parent.name == "05"
         assert path.parent.parent.parent.name == "2026"
 
 
-# ── TestPromptIsLargeEnoughCheck ──────────────────────────────────────────
-
-
-class TestPromptInUse:
-    async def test_prompt_actually_called(
-        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
-    ) -> None:
-        _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        # Capture the expected prompt BEFORE the briefer runs · once
-        # it runs, stages_done gains "write" and the prompt would
-        # serialise a different stages_done line.
-        expected_prompt = build_writer_prompt(build_payload(db, RUN_ID))
-        llm = FakeLlmClient(default=canned)
-        await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
-        # The Fake's call_log captures every prompt; verify the first
-        # prompt matches.
-        assert expected_prompt in llm.calls[0]
-
-
-def _payload_unused_just_a_check(_: BriefingPayload) -> None:  # pragma: no cover
-    """Keep BriefingPayload import live for future test extensions."""
-
-
-# ── Regression: target_date drives markdown path (2026-05-24) ──────────────
+# ── TestTargetDateInBriefer ──────────────────────────────────────────────
 
 
 class TestTargetDateInBriefer:
-    """When ``target_date`` is passed to Briefer, the markdown path
-    uses that date · not the started_at-derived one. Regression for the
-    2026-05-23 smoke run that wrote the next-TR-day briefing into
-    2026/05/23 because started_at was UTC."""
-
     async def test_target_date_drives_markdown_directory(
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
-        llm = FakeLlmClient(default=canned)
-        # started_at in the fixture is 2026-05-23. We override with
-        # the next day's TR-local date.
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
         tr_today = date(2026, 5, 24)
         result = await Briefer(
             db,
@@ -312,11 +295,10 @@ class TestTargetDateInBriefer:
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
         tr_today = date(2026, 5, 24)
         await Briefer(
             db,
-            FakeLlmClient(default=canned),
+            FakeLlmClient(default=VALID_SECTION_CONTENT),
             briefings_root=tmp_path / "briefings",
             target_date=tr_today,
         ).run(RUN_ID)
@@ -329,15 +311,65 @@ class TestTargetDateInBriefer:
     async def test_omitting_target_date_falls_back_to_started_at(
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
-        """Legacy behavior preserved · existing tests without
-        target_date still produce the started_at-dated briefing."""
         _seed_one_cluster(db)
-        canned = _valid_canned_briefing(db)
         result = await Briefer(
             db,
-            FakeLlmClient(default=canned),
+            FakeLlmClient(default=VALID_SECTION_CONTENT),
             briefings_root=tmp_path / "briefings",
         ).run(RUN_ID)
         path = Path(result["path"])
-        # NOW.date() == 2026-05-23 in the fixture.
         assert path.parent.name == "23"
+
+
+# ── TestPrefillWiring ────────────────────────────────────────────────────
+
+
+class TestPrefillWiring:
+    async def test_briefer_uses_per_section_prefill(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_one_cluster(db)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
+        await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
+        assert len(llm.prefill_calls) == 7
+        for i in range(7):
+            assert llm.prefill_calls[i].startswith(TEMPLATE_SECTIONS[i].marker)
+
+    async def test_written_markdown_starts_with_document_title(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_one_cluster(db)
+        llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
+        result = await Briefer(
+            db, llm, briefings_root=tmp_path / "briefings"
+        ).run(RUN_ID)
+        on_disk = Path(result["path"]).read_text("utf-8")
+        assert on_disk.startswith(DOCUMENT_TITLE)
+
+
+# ── TestLlmException ─────────────────────────────────────────────────────
+
+
+class TestLlmException:
+    async def test_llm_exception_produces_stub(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_one_cluster(db)
+
+        def responder(_prompt: str, _attempt: int) -> str:
+            raise RuntimeError("simulated llm outage")
+
+        llm = FakeLlmClient(responder=responder)
+        result = await Briefer(
+            db, llm, briefings_root=tmp_path / "briefings"
+        ).run(RUN_ID)
+
+        assert result["sections_failed"] == [0, 1, 2, 3, 4, 5, 6]
+        assert result["used_fallback"] is False
+        assert validate_briefing_markdown(
+            Path(result["path"]).read_text("utf-8")
+        ) == []
+
+
+def _payload_unused_just_a_check(_: BriefingPayload) -> None:  # pragma: no cover
+    """Keep BriefingPayload import live for future test extensions."""

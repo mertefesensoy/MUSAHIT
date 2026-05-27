@@ -97,7 +97,33 @@ def validate_briefing_markdown(text: str) -> list[str]:
     return errors
 
 
+def validate_section(text: str, section_idx: int) -> bool:
+    """Per-section validator.
+
+    Pass conditions:
+    - First non-blank line is TEMPLATE_SECTIONS[section_idx].marker
+    - No other lines starting with '## ❯' appear in the text
+    - Text contains at least one non-marker non-empty line
+    """
+    if not text or not text.strip():
+        return False
+    lines = text.splitlines()
+    first_nonblank = next((line for line in lines if line.strip()), "")
+    expected_marker = TEMPLATE_SECTIONS[section_idx].marker
+    if first_nonblank.strip() != expected_marker:
+        return False
+    marker_count = sum(1 for line in lines if line.strip().startswith("## ❯"))
+    if marker_count > 1:
+        return False
+    content_lines = [
+        line for line in lines
+        if line.strip() and line.strip() != expected_marker
+    ]
+    return bool(content_lines)
+
+
 __all__ = [
     "EXTRA_SECTION_ALLOWED_PREFIX",
     "validate_briefing_markdown",
+    "validate_section",
 ]

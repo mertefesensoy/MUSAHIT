@@ -366,9 +366,19 @@ def _format_date(d: date) -> str:
     return f"{d.day} {_MONTHS_TR[d.month - 1]} {d.year}"
 
 
+def render_section_stub(section_idx: int) -> str:
+    """Render a placeholder stub for a section whose LLM generation failed."""
+    section = TEMPLATE_SECTIONS[section_idx]
+    return (
+        f"{section.marker}\n\n"
+        f"Bu bölüm üretilemedi · yedek metin kullanıldı."
+    )
+
+
 __all__ = [
     "ARC_STALLED_MARKER",
     "ARC_UPDATE_PREFIX",
     "VOICED_OPEN_ARCS_CAP",
     "render_fallback_briefing",
+    "render_section_stub",
 ]
