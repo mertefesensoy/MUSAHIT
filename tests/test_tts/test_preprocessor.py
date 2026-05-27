@@ -205,6 +205,53 @@ class TestWhitespace:
 # ── Order-of-operations integration ────────────────────────────────────────
 
 
+# ── Arc ID rewriting ──────────────────────────────────────────────────────
+
+
+class TestArcIdRewriting:
+    """The preprocessor rewrites ``arc_YYYYMMDD_NNNN`` to ``hikaye N``.
+
+    The written briefing (briefing.md) keeps full arc IDs for
+    cross-referencing. The TTS-bound text uses only the trailing serial
+    to avoid Piper reading the YYYYMMDD prefix as a huge integer.
+    """
+
+    def test_single_arc_id(self) -> None:
+        out = preprocess_for_tts("arc_20260523_0001")
+        assert "hikaye 1" in out
+
+    def test_triple_digit_serial(self) -> None:
+        out = preprocess_for_tts("arc_20260526_0167")
+        assert "hikaye 167" in out
+
+    def test_multiple_arc_ids_in_bullet_list(self) -> None:
+        text = "Diğer hikayeler: arc_20260524_0072 · arc_20260525_0003"
+        out = preprocess_for_tts(text)
+        assert "hikaye 72" in out
+        assert "hikaye 3" in out
+        assert "arc_" not in out
+
+    def test_inline_prose(self) -> None:
+        text = "...bağlantılı arc_20260523_0001 sürüyor."
+        out = preprocess_for_tts(text)
+        assert "hikaye 1" in out
+        assert "arc_20260523_0001" not in out
+
+    def test_no_arc_ids_passthrough(self) -> None:
+        text = "Hiçbir hikaye referansı yok."
+        out = preprocess_for_tts(text)
+        assert out.strip() == text
+
+    def test_backtick_wrapped_arc_id(self) -> None:
+        text = "`arc_20260523_0001` hakkında bilgi"
+        out = preprocess_for_tts(text)
+        assert "hikaye 1" in out
+        assert "arc_20260523_0001" not in out
+
+
+# ── Order-of-operations integration ────────────────────────────────────────
+
+
 class TestIntegratedFlow:
     def test_realistic_briefing_chunk(self) -> None:
         text = "\n".join(

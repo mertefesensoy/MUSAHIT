@@ -107,6 +107,17 @@ _ARROW_RE = re.compile(r"❯\s*")
 # Multiple blank lines → single blank line (preserves paragraph breaks
 # for Piper's natural sentence pausing).
 _BLANKLINES_RE = re.compile(r"\n{3,}")
+# Arc story IDs (``arc_20260523_0001``) are cross-reference anchors in
+# the written briefing. Piper reads the YYYYMMDD segment as a huge
+# integer ("yirmi milyon iki yüz altmış bin…") — audio garbage. The
+# TTS-bound text rewrites them to ``hikaye N`` using only the trailing
+# serial, matching the operator's spoken "story N" convention.
+_ARC_ID_RE = re.compile(r"arc_\d{8}_(\d{4})")
+
+
+def _rewrite_arc_ids_for_tts(text: str) -> str:
+    """Rewrite ``arc_YYYYMMDD_NNNN`` to ``hikaye N`` for TTS."""
+    return _ARC_ID_RE.sub(lambda m: f"hikaye {int(m.group(1))}", text)
 
 
 def preprocess_for_tts(text: str) -> str:
@@ -131,16 +142,19 @@ def preprocess_for_tts(text: str) -> str:
     text = _HRULE_RE.sub("", text)
     text = _ARROW_RE.sub("", text)
 
-    # 3. Expand DEFCON numerals to Turkish words.
+    # 3. Rewrite arc IDs to readable "hikaye N" form.
+    text = _rewrite_arc_ids_for_tts(text)
+
+    # 4. Expand DEFCON numerals to Turkish words.
     text = _DEFCON_NUM_RE.sub(_defcon_num_repl, text)
 
-    # 4. Expand acronyms (whole-word, case-sensitive — Turkish acronyms
+    # 5. Expand acronyms (whole-word, case-sensitive — Turkish acronyms
     #    are always uppercase in MÜŞAHİT's pipeline so case-sensitivity
     #    is safe and faster than re-matching mixed case).
     for acronym, expansion in ABBREVIATIONS.items():
         text = re.sub(rf"\b{re.escape(acronym)}\b", expansion, text)
 
-    # 5. Collapse runs of blank lines to a single blank line.
+    # 6. Collapse runs of blank lines to a single blank line.
     text = _BLANKLINES_RE.sub("\n\n", text)
 
     return text.strip() + "\n" if text.strip() else ""
