@@ -26,15 +26,10 @@ import duckdb
 from musahit.common.logging import get_logger
 from musahit.common.time import utcnow
 from musahit.score.llm_client import LlmClient
-from musahit.writer.fallback import render_fallback_briefing, render_section_stub
+from musahit.writer.fallback import render_fallback_briefing
 from musahit.writer.payload import BriefingPayload, build_payload
-from musahit.writer.prompt import (
-    build_section_user,
-    build_system_log_section,
-    build_writer_system,
-)
-from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
-from musahit.writer.validator import validate_briefing_markdown, validate_section
+from musahit.writer.prompt import build_writer_prompt
+from musahit.writer.validator import validate_briefing_markdown
 
 _log = get_logger("musahit.writer")
 
@@ -80,19 +75,14 @@ class Briefer:
             self._conn, run_id, target_date=self._target_date
         )
 
-        markdown, used_fallback, failed_indices = await self._compose(payload, log)
+        markdown, used_fallback = await self._compose(payload, log)
         path = self._write_markdown(payload, markdown)
         self._upsert_briefings_row(payload, path)
-        self._mark_stage_done(
-            run_id,
-            used_fallback=used_fallback,
-            sections_failed=failed_indices,
-        )
+        self._mark_stage_done(run_id, used_fallback=used_fallback)
 
         log.info(
             "writer_done",
             used_fallback=used_fallback,
-            sections_failed=failed_indices,
             cluster_count=payload.cluster_count,
             arc_count=payload.arc_count,
             open_arc_count=payload.open_arc_count,
@@ -102,63 +92,45 @@ class Briefer:
         return {
             "path": str(path),
             "used_fallback": used_fallback,
-            "sections_failed": failed_indices,
             "cluster_count": payload.cluster_count,
             "arc_count": payload.arc_count,
             "open_arc_count": payload.open_arc_count,
             "peak_defcon": payload.peak_defcon,
         }
 
-    # ── Per-section compose ────────────────────────────────────────────
+    # ── Compose loop ────────────────────────────────────────────────────
 
-    async def _compose(
-        self, payload: BriefingPayload, log: Any
-    ) -> tuple[str, bool, list[int]]:
-        """Returns (markdown, used_fallback, failed_indices)."""
-        system = build_writer_system()
-        sections: list[str] = []
-        failed_indices: list[int] = []
-
-        for idx in range(7):
-            section = TEMPLATE_SECTIONS[idx]
-            user = build_section_user(payload, idx)
-            prefill = f"{section.marker}\n\n"
+    async def _compose(self, payload: BriefingPayload, log: Any) -> tuple[str, bool]:
+        """Try the LLM up to ``max_retries+1`` times; fall through to fallback."""
+        base_prompt = build_writer_prompt(payload)
+        prompt = base_prompt
+        last_errors: list[str] = []
+        for attempt in range(self._max_retries + 1):
             kwargs = self._llm_kwargs()
             try:
-                continuation = await self._llm.generate_with_prefill(
-                    system, user, prefill, **kwargs
-                )
+                raw = await self._llm.generate(prompt, **kwargs)
             except Exception as exc:
                 log.warning(
-                    "writer_section_error",
-                    section_idx=idx,
+                    "writer_llm_error",
+                    attempt=attempt,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                sections.append(render_section_stub(idx))
-                failed_indices.append(idx)
+                last_errors = [f"LLM error: {type(exc).__name__}: {exc}"]
+                prompt = self._retry_prompt(base_prompt, last_errors)
                 continue
-            full = prefill + continuation
-            if validate_section(full, idx):
-                sections.append(full)
-            else:
-                log.warning("writer_section_invalid", section_idx=idx)
-                sections.append(render_section_stub(idx))
-                failed_indices.append(idx)
-
-        sections.append(build_system_log_section(payload, failed_indices))
-
-        markdown = f"{DOCUMENT_TITLE}\n\n" + "\n\n".join(sections)
-
-        errors = validate_briefing_markdown(markdown)
-        if not errors:
-            used_fallback = len(failed_indices) == len(TEMPLATE_SECTIONS)
-            return markdown, used_fallback, failed_indices
-        log.warning("writer_fallback", errors=errors[:3])
-        return (
-            render_fallback_briefing(payload),
-            True,
-            list(range(len(TEMPLATE_SECTIONS))),
-        )
+            errors = validate_briefing_markdown(raw)
+            if not errors:
+                return raw, False
+            last_errors = errors
+            log.warning(
+                "writer_validator_failed",
+                attempt=attempt,
+                errors=errors[:3],
+            )
+            prompt = self._retry_prompt(base_prompt, errors)
+        # All retries exhausted · fallback.
+        log.warning("writer_fallback", last_errors=last_errors[:3])
+        return render_fallback_briefing(payload), True
 
     def _llm_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -168,6 +140,18 @@ class Briefer:
         if self._writer_model is not None:
             kwargs["model"] = self._writer_model
         return kwargs
+
+    def _retry_prompt(self, base_prompt: str, errors: list[str]) -> str:
+        if not errors:
+            return base_prompt
+        complaint = "\n".join(f"- {e}" for e in errors[:5])
+        return (
+            base_prompt
+            + "\n\nÖNCEKİ DENEMEDE ŞABLON DOĞRULAYICI HATA VERDİ:\n"
+            + complaint
+            + "\nLütfen şablon yapısını korumayı tekrar dene. Aynı bölüm "
+            "başlıklarını harfi harfine kullan."
+        )
 
     # ── Persistence ─────────────────────────────────────────────────────
 
@@ -216,13 +200,7 @@ class Briefer:
 
     # ── stages_done ─────────────────────────────────────────────────────
 
-    def _mark_stage_done(
-        self,
-        run_id: str,
-        *,
-        used_fallback: bool,
-        sections_failed: list[int],
-    ) -> None:
+    def _mark_stage_done(self, run_id: str, *, used_fallback: bool) -> None:
         row = self._conn.execute(
             "SELECT stages_done, counts FROM pipeline_runs WHERE run_id = ?",
             [run_id],
@@ -232,7 +210,6 @@ class Briefer:
         if "write" not in stages:
             stages.append("write")
         counts["writer_used_fallback"] = used_fallback
-        counts["writer_sections_fallback"] = sections_failed
         self._conn.execute(
             "UPDATE pipeline_runs SET stages_done = ?, counts = ? WHERE run_id = ?",
             [json.dumps(stages), json.dumps(counts), run_id],
