@@ -21,6 +21,7 @@ import pytest
 from musahit.cluster.clusterer import (
     DEFAULT_COSINE_THRESHOLD,
     Clusterer,
+    EmbeddingUnavailableError,
 )
 from musahit.cluster.embedder import DIMENSION, FakeEmbeddingClient
 from musahit.common.migrations import init_db
@@ -425,6 +426,132 @@ class TestStagesDone:
         assert "cluster" in stages
         # And appended in order.
         assert stages[-1] == "cluster"
+
+
+# ── TestDefaultThreshold ───────────────────────────────────────────────────
+
+
+# ── TestEmbedFailureRaisesClearError (Issue 1 · 2026-05-28) ────────────────
+
+
+class _FailingEmbeddingClient:
+    """Embedder stand-in that raises on every embed call.
+
+    Models the 02:00 incident: Ollama 500s the /api/embed call, the
+    clusterer's _embed_articles swallows the exception and returns [],
+    then strict-zip would crash with a cryptic ValueError. With the
+    Issue 1 guard in place the length-mismatch instead raises the
+    explicit EmbeddingUnavailableError BEFORE the zip runs.
+    """
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("simulated embedder failure (HTTP 500)")
+
+
+class _ShortEmbeddingClient:
+    """Embedder stand-in that returns fewer vectors than inputs.
+
+    Mirrors the "partial result with no None markers" failure mode ·
+    the strict zip would crash, the guard catches it first.
+    """
+
+    def __init__(self, return_count: int) -> None:
+        self._return_count = return_count
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] * DIMENSION for _ in range(self._return_count)]
+
+
+class TestEmbedFailureRaisesClearError:
+    async def test_embed_total_failure_raises_clear_error(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("err1"),
+            source_id="bianet",
+            title="Test başlığı",
+            body=_body(EC_BAG),
+        )
+        clusterer = Clusterer(ingest_db, _FailingEmbeddingClient())
+
+        with pytest.raises(EmbeddingUnavailableError) as exc_info:
+            await clusterer.run("run_test")
+
+        msg = str(exc_info.value)
+        assert "0 vectors" in msg
+        assert "1 articles" in msg
+        # The cryptic zip ValueError must NOT bubble up.
+        assert "zip()" not in msg
+
+        # Re-runnability · cluster did NOT get added to stages_done.
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" not in stages
+
+    async def test_embed_length_mismatch_raises_clear_error(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # Two eligible articles, embedder returns only one vector.
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("m1"),
+            source_id="bianet",
+            title="Birinci başlık",
+            body=_body(EC_BAG),
+        )
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("m2"),
+            source_id="cumhuriyet",
+            title="İkinci başlık",
+            body=_body(EC_BAG),
+            published_at=datetime(2026, 5, 23, 9, 0, 0),
+        )
+        clusterer = Clusterer(ingest_db, _ShortEmbeddingClient(return_count=1))
+
+        with pytest.raises(EmbeddingUnavailableError) as exc_info:
+            await clusterer.run("run_test")
+
+        msg = str(exc_info.value)
+        assert "1 vectors" in msg
+        assert "2 articles" in msg
+
+        # No half-clustered state · stage stays out of stages_done.
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" not in stages
+
+    async def test_no_eligible_articles_does_not_raise(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        # When every article is below the embedding floor, embeddable
+        # is empty · _embed_articles returns [] · guard sees 0 == 0 ·
+        # no raise · stage marks done normally.
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("tiny"),
+            source_id="bianet",
+            title="t",
+            body="çok kısa",
+            word_count=2,
+        )
+
+        result = await Clusterer(
+            ingest_db, _FailingEmbeddingClient()
+        ).run("run_test")
+
+        assert result["new_clusters"] == 0
+        assert result["skipped_empty"] == 1
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" in stages
 
 
 # ── TestDefaultThreshold ───────────────────────────────────────────────────

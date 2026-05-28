@@ -53,6 +53,18 @@ MIN_WORD_COUNT_FOR_EMBEDDING: int = 10
 MIN_WORD_COUNT_FOR_NEW_CLUSTER: int = 30
 
 
+class EmbeddingUnavailableError(RuntimeError):
+    """Raised when the embedder cannot supply a vector for every eligible
+    article. Surfaces as a clean, re-runnable stage failure instead of
+    the cryptic ``zip() argument 2 is shorter than argument 1`` that the
+    strict zip would otherwise emit.
+
+    The stage that catches this in the orchestrator marks ``cluster`` as
+    a failed_stages entry · ``cluster`` does NOT enter ``stages_done`` ·
+    so ``--stage cluster --force`` on a later run will retry cleanly.
+    """
+
+
 # ── Data shapes ────────────────────────────────────────────────────────────
 
 
@@ -113,6 +125,16 @@ class Clusterer:
         skipped_empty = len(articles) - len(embeddable)
 
         vectors = await self._embed_articles(embeddable)
+        if len(vectors) != len(embeddable):
+            log.warning(
+                "cluster_embed_incomplete",
+                expected=len(embeddable),
+                got=len(vectors),
+            )
+            raise EmbeddingUnavailableError(
+                f"embedding returned {len(vectors)} vectors for "
+                f"{len(embeddable)} articles · cluster stage cannot proceed"
+            )
         self._persist_embeddings(embeddable, vectors)
 
         # Phase 2: language-partitioned greedy single-pass.
@@ -221,12 +243,13 @@ class Clusterer:
     async def _embed_articles(
         self, articles: list[_Article]
     ) -> list[list[float]]:
-        """Build the embedding inputs and call the embedder in one go.
+        """Build the embedding inputs and call the embedder.
 
         The embedder owns its own batching (per ADR-002 the production
-        Ollama client batches in 50s); we hand it everything at once and
-        let it slice internally. Per-batch failures bubble up — see the
-        try/except in :meth:`run`.
+        Ollama client batches in chunks). On total failure we return
+        ``[]``; the ``run`` length-mismatch guard then raises
+        :class:`EmbeddingUnavailableError` so the cluster stage fails
+        cleanly and remains re-runnable.
         """
         texts = [self._embedding_input(a) for a in articles]
         if not texts:
@@ -238,6 +261,7 @@ class Clusterer:
                 "cluster_embed_failed",
                 count=len(texts),
                 error=f"{type(exc).__name__}: {exc}",
+                stage_impact="cluster_will_fail_and_be_rerunnable",
             )
             return []
 
@@ -399,4 +423,5 @@ __all__ = [
     "MIN_WORD_COUNT_FOR_EMBEDDING",
     "MIN_WORD_COUNT_FOR_NEW_CLUSTER",
     "Clusterer",
+    "EmbeddingUnavailableError",
 ]
