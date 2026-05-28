@@ -13,17 +13,28 @@ floats; the cluster_embeddings / article_embeddings columns are
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 from typing import Any, Protocol
 
 import httpx
 
+from musahit.common.logging import get_logger
+
+_log = get_logger("musahit.cluster.embedder")
+
 DIMENSION: int = 1024
 DEFAULT_OLLAMA_URL: str = "http://localhost:11434"
 DEFAULT_MODEL: str = "bge-m3"
-DEFAULT_BATCH_SIZE: int = 50
+# The pre-Issue-2 default was 50. Lowered to 16 after the 2026-05-28
+# Ollama-OOM incident · smaller per-call batches reduce the peak memory
+# footprint when bge-m3 is loaded alongside other 4-5GB models. Per-batch
+# retries + adaptive halving handle the rare batches that still 500.
+DEFAULT_BATCH_SIZE: int = 16
 DEFAULT_TIMEOUT_SECONDS: float = 60.0
+DEFAULT_MAX_RETRIES: int = 3
+DEFAULT_BACKOFF_BASE_SECONDS: float = 2.0
 
 
 # ── Protocol ───────────────────────────────────────────────────────────────
@@ -42,13 +53,20 @@ class OllamaEmbeddingClient:
     """Production embedder: POSTs batches to Ollama's ``/api/embed``.
 
     Ollama's modern embed endpoint (since v0.1.30+) accepts an ``input``
-    list and returns matching ``embeddings``. The client batches the
-    caller's full ``texts`` list into ``batch_size``-chunks so a 500-
-    article night becomes ~10 HTTP calls rather than one big payload.
+    list and returns matching ``embeddings``. The client slices the
+    caller's full ``texts`` list into ``batch_size``-chunks (default 16
+    after the 2026-05-28 OOM incident, down from 50). Each batch is
+    retried with exponential backoff on transient errors (HTTP 5xx,
+    timeout, connection); a batch that still fails after retries is
+    halved recursively down to single items. A single item that fails
+    every retry raises an :class:`httpx.HTTPError` (or the originating
+    exception) so the Clusterer's guard surfaces a clean
+    EmbeddingUnavailableError.
 
-    Failures bubble up — the Clusterer is the layer that decides whether
-    to translate them into IngestStatus-style outcomes for the run
-    summary.
+    Order preservation: batches are processed sequentially; halving
+    splits a slice in place and recursively embeds each half, then
+    concatenates left+right · the output position of every input text
+    is preserved.
     """
 
     def __init__(
@@ -57,12 +75,16 @@ class OllamaEmbeddingClient:
         model: str = DEFAULT_MODEL,
         batch_size: int = DEFAULT_BATCH_SIZE,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._batch_size = batch_size
         self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
+        self._backoff_base_seconds = backoff_base_seconds
         self._injected_client = client
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -80,15 +102,93 @@ class OllamaEmbeddingClient:
         out: list[list[float]] = []
         for start in range(0, len(texts), self._batch_size):
             batch = texts[start : start + self._batch_size]
-            response = await client.post(
-                f"{self._base_url}/api/embed",
-                json={"model": self._model, "input": batch},
-                timeout=self._timeout_seconds,
-            )
-            response.raise_for_status()
-            data: dict[str, Any] = response.json()
-            out.extend(data["embeddings"])
+            vectors = await self._embed_batch_resilient(client, batch)
+            out.extend(vectors)
         return out
+
+    async def _embed_batch_resilient(
+        self, client: httpx.AsyncClient, batch: list[str]
+    ) -> list[list[float]]:
+        """Try the batch with retries; on persistent failure, halve and recurse.
+
+        Recursive base case: a single-item batch that still fails after
+        all retries · re-raises the last exception so the caller's
+        length-mismatch guard fires.
+        """
+        try:
+            return await self._embed_batch_with_retry(client, batch)
+        except Exception as exc:
+            if len(batch) <= 1:
+                _log.warning(
+                    "embed_item_failed",
+                    item_index_in_batch=0,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+            mid = len(batch) // 2
+            _log.warning(
+                "embed_batch_halved",
+                batch_size=len(batch),
+                left_size=mid,
+                right_size=len(batch) - mid,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            left = await self._embed_batch_resilient(client, batch[:mid])
+            right = await self._embed_batch_resilient(client, batch[mid:])
+            return left + right
+
+    async def _embed_batch_with_retry(
+        self, client: httpx.AsyncClient, batch: list[str]
+    ) -> list[list[float]]:
+        """One batch · 1 + max_retries attempts · exponential backoff."""
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await self._post_batch(client, batch)
+            except (httpx.HTTPStatusError, httpx.TransportError,
+                    httpx.TimeoutException) as exc:
+                last_exc = exc
+                if not _is_retryable(exc):
+                    raise
+                if attempt < self._max_retries:
+                    sleep_for = self._backoff_base_seconds * (2 ** attempt)
+                    _log.warning(
+                        "embed_batch_retry",
+                        attempt=attempt,
+                        batch_size=len(batch),
+                        sleep_seconds=sleep_for,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    await asyncio.sleep(sleep_for)
+                    continue
+                raise
+        # Defensive · should be unreachable; satisfies the type checker.
+        assert last_exc is not None
+        raise last_exc
+
+    async def _post_batch(
+        self, client: httpx.AsyncClient, batch: list[str]
+    ) -> list[list[float]]:
+        response = await client.post(
+            f"{self._base_url}/api/embed",
+            json={"model": self._model, "input": batch},
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        return data["embeddings"]
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Transient errors worth retrying: 5xx, timeout, connection failures.
+
+    4xx (except 408/429) are caller bugs — retrying won't help, so they
+    surface immediately.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status >= 500 or status in (408, 429)
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
 # ── Fake (testing) implementation ──────────────────────────────────────────
@@ -133,7 +233,9 @@ class FakeEmbeddingClient:
 
 
 __all__ = [
+    "DEFAULT_BACKOFF_BASE_SECONDS",
     "DEFAULT_BATCH_SIZE",
+    "DEFAULT_MAX_RETRIES",
     "DEFAULT_MODEL",
     "DEFAULT_OLLAMA_URL",
     "DEFAULT_TIMEOUT_SECONDS",
