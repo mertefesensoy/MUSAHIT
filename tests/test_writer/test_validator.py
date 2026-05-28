@@ -141,3 +141,83 @@ class TestValidateSection:
     def test_validate_section_rejects_empty_content(self) -> None:
         text = f"{TEMPLATE_SECTIONS[0].marker}\n\n"
         assert validate_section(text, 0) is False
+
+
+# ── Issue 3b · Validator hardening for prompt echo + CoT ──────────────────
+
+
+class TestValidateSectionRejectsPromptEcho:
+    """The 2026-05-27 specimen had DİKKAT and AMBİYANS contaminated with
+    DISCIPLINE_RULES echo and chain-of-thought scaffolding. The
+    per-section validator now rejects these so the writer cannot ship
+    fabricated, echoed, or CoT-scaffolded content."""
+
+    def test_rejects_kurallar_marker(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[4].marker}\n\n"
+            "KURALLAR (ADR-009):\n"
+            "- Yorum yapma · sadece raporla.\n"
+        )
+        assert validate_section(text, 4) is False
+
+    def test_rejects_bolum_verisi_marker(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[4].marker}\n\n"
+            "İçerik var.\n"
+            "BÖLÜM VERİSİ:\n(bugün öğe yok)\n"
+        )
+        assert validate_section(text, 4) is False
+
+    def test_rejects_cikti_trailer(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[4].marker}\n\n"
+            "İçerik.\n"
+            "ÇIKTI (yalnızca bu bölümün içeriği):\n"
+        )
+        assert validate_section(text, 4) is False
+
+    def test_rejects_gorev_marker(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[4].marker}\n\n"
+            "GÖREV · Aşağıdaki bölümü yaz.\n"
+        )
+        assert validate_section(text, 4) is False
+
+
+class TestValidateSectionRejectsChainOfThought:
+    def test_rejects_adim_n(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[5].marker}\n\n"
+            "Adım 1: Olayları sırala.\n"
+            "İçerik buradadır.\n"
+        )
+        assert validate_section(text, 5) is False
+
+    def test_rejects_gerekce(self) -> None:
+        text = (
+            f"{TEMPLATE_SECTIONS[5].marker}\n\n"
+            "Gerekçe: Tarafsız bakış için.\n"
+            "İçerik buradadır.\n"
+        )
+        assert validate_section(text, 5) is False
+
+    def test_accepts_clean_prose(self) -> None:
+        # Legitimate Turkish prose without any echo or CoT must pass.
+        text = (
+            f"{TEMPLATE_SECTIONS[0].marker}\n\n"
+            "### Önemli olay başlığı\n"
+            "**DEFCON** · ŞİDDETLİ · **Kategori** · POLİTİKA · **Güven** · YÜKSEK\n"
+            "**Kaynaklar** · bianet·centrist · cumhuriyet·opposition\n\n"
+            "Bu olay bugün gerçekleşti ve birden fazla kaynak teyit etti.\n"
+        )
+        assert validate_section(text, 0) is True
+
+    def test_rejects_legacy_placeholder_echo(self) -> None:
+        # Regression for the 2026-05-23 placeholder-echo bug · the
+        # per-section validator catches it just like the whole-briefing
+        # validator does.
+        text = (
+            f"{TEMPLATE_SECTIONS[2].marker}\n\n"
+            "[içerik buraya · şablon talimatlarına bak]\n"
+        )
+        assert validate_section(text, 2) is False

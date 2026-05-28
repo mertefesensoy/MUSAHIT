@@ -1,17 +1,31 @@
-"""Writer orchestrator: build payload → call LLM → validate → retry / fallback → persist.
+"""Writer orchestrator: per-section LLM generation with stub fallback.
 
-Per ADR-012 § Stage 6 Writer the writer always produces *something*.
-The LLM is called up to ``max_retries + 1`` times; the first call uses
-the bare prompt, each retry appends the validator's specific errors so
-the model can correct itself. After the final failure we fall through
-to :func:`musahit.writer.fallback.render_fallback_briefing` · the
-operator gets a structurally-valid briefing in any case.
+Per the 2026-05-27 per-section refactor (ADR-012 amendment) the writer
+issues 8 calls · one per template section · rather than one big prompt.
+Six LLM-driven sections use ``generate_with_prefill`` with the section
+marker as the assistant prefill so the model cannot emit the wrong
+header. Section 7 (SİSTEM LOG) is rendered deterministically. Empty
+sections (no payload data) emit a canonical "bugün öğe yok" note
+WITHOUT calling the LLM · the 2026-05-27 hallucinated specimen showed
+the model invents content for empty sections every time.
 
-The briefing markdown is written to
-``briefings/YYYY/MM/DD/briefing.md`` and a ``briefings`` row is
-inserted (or updated) with the day's aggregate counts. Multiple runs
-on the same date overwrite the file and update the row · the briefing
-is per-date, not per-run.
+Failure isolation:
+
+* LLM raises / returns text that fails ``validate_section`` →
+  ``render_section_stub(idx)`` substitutes a stub. Other sections are
+  unaffected.
+* ``validate_section`` rejects prompt echo (DISCIPLINE_RULES markers,
+  BÖLÜM VERİSİ, ÇIKTI trailers) and chain-of-thought scaffolding
+  ("Adım N:" / "Gerekçe:") so hallucinated specimens never ship.
+* If all 8 sections fail OR the final assembled markdown fails
+  ``validate_briefing_markdown``, fall through to
+  ``render_fallback_briefing`` · ``used_fallback=True``. Partial-stub
+  runs are NOT full fallback per ADR-012 amendment.
+
+The briefing markdown is written to ``briefings/YYYY/MM/DD/briefing.md``
+and a ``briefings`` row is inserted (or updated) with the day's
+aggregate counts. Multiple runs on the same date overwrite the file
+and update the row · the briefing is per-date, not per-run.
 """
 
 from __future__ import annotations
@@ -26,17 +40,38 @@ import duckdb
 from musahit.common.logging import get_logger
 from musahit.common.time import utcnow
 from musahit.score.llm_client import LlmClient
-from musahit.writer.fallback import render_fallback_briefing
-from musahit.writer.payload import BriefingPayload, build_payload
-from musahit.writer.prompt import build_writer_prompt
-from musahit.writer.validator import validate_briefing_markdown
+from musahit.writer.fallback import render_fallback_briefing, render_section_stub
+from musahit.writer.payload import (
+    BUCKET_AMBIENT,
+    BUCKET_MATERIAL,
+    BUCKET_PRIORITY,
+    BUCKET_ROUTINE,
+    BriefingPayload,
+    build_payload,
+)
+from musahit.writer.prompt import (
+    build_section_user,
+    build_system_log_section,
+    build_writer_system,
+)
+from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
+from musahit.writer.validator import validate_briefing_markdown, validate_section
 
 _log = get_logger("musahit.writer")
 
-DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BRIEFINGS_ROOT: Path = Path("briefings")
 DEFAULT_WRITER_TEMPERATURE: float = 0.3
 DEFAULT_WRITER_MAX_TOKENS: int = 4096
+
+# Sentinel emitted for empty sections instead of calling the LLM. The
+# 2026-05-27 hallucinated specimen showed the model invents COVID
+# headlines and CHP intrigue when given an empty section payload · the
+# only safe answer is "don't call the LLM."
+EMPTY_SECTION_NOTE_TR: str = "Bugün bu bölümde öğe yok."
+
+# Indices into TEMPLATE_SECTIONS. 7 is the deterministic SİSTEM LOG.
+SYSTEM_LOG_SECTION_IDX: int = 7
+LLM_SECTION_INDICES: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
 
 
 class Briefer:
@@ -57,7 +92,6 @@ class Briefer:
         conn: duckdb.DuckDBPyConnection,
         llm: LlmClient,
         briefings_root: Path = DEFAULT_BRIEFINGS_ROOT,
-        max_retries: int = DEFAULT_MAX_RETRIES,
         writer_model: str | None = None,
         *,
         target_date: date | None = None,
@@ -65,7 +99,6 @@ class Briefer:
         self._conn = conn
         self._llm = llm
         self._root = Path(briefings_root)
-        self._max_retries = max_retries
         self._writer_model = writer_model
         self._target_date = target_date
 
@@ -75,14 +108,19 @@ class Briefer:
             self._conn, run_id, target_date=self._target_date
         )
 
-        markdown, used_fallback = await self._compose(payload, log)
+        markdown, used_fallback, sections_failed = await self._compose(payload, log)
         path = self._write_markdown(payload, markdown)
         self._upsert_briefings_row(payload, path)
-        self._mark_stage_done(run_id, used_fallback=used_fallback)
+        self._mark_stage_done(
+            run_id,
+            used_fallback=used_fallback,
+            sections_failed=sections_failed,
+        )
 
         log.info(
             "writer_done",
             used_fallback=used_fallback,
+            sections_failed=sections_failed,
             cluster_count=payload.cluster_count,
             arc_count=payload.arc_count,
             open_arc_count=payload.open_arc_count,
@@ -92,6 +130,7 @@ class Briefer:
         return {
             "path": str(path),
             "used_fallback": used_fallback,
+            "sections_failed": sections_failed,
             "cluster_count": payload.cluster_count,
             "arc_count": payload.arc_count,
             "open_arc_count": payload.open_arc_count,
@@ -100,37 +139,109 @@ class Briefer:
 
     # ── Compose loop ────────────────────────────────────────────────────
 
-    async def _compose(self, payload: BriefingPayload, log: Any) -> tuple[str, bool]:
-        """Try the LLM up to ``max_retries+1`` times; fall through to fallback."""
-        base_prompt = build_writer_prompt(payload)
-        prompt = base_prompt
-        last_errors: list[str] = []
-        for attempt in range(self._max_retries + 1):
-            kwargs = self._llm_kwargs()
-            try:
-                raw = await self._llm.generate(prompt, **kwargs)
-            except Exception as exc:
-                log.warning(
-                    "writer_llm_error",
-                    attempt=attempt,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-                last_errors = [f"LLM error: {type(exc).__name__}: {exc}"]
-                prompt = self._retry_prompt(base_prompt, last_errors)
-                continue
-            errors = validate_briefing_markdown(raw)
-            if not errors:
-                return raw, False
-            last_errors = errors
+    async def _compose(
+        self, payload: BriefingPayload, log: Any
+    ) -> tuple[str, bool, list[int]]:
+        """Generate each section · assemble · validate.
+
+        Returns ``(markdown, used_fallback, sections_failed)``.
+
+        * ``sections_failed`` lists LLM-section indices (0-6) that
+          could not be generated cleanly and were replaced with a stub.
+          Empty sections that emitted the canonical "öğe yok" note are
+          NOT counted as failures · empties are correct behavior.
+        * ``used_fallback`` is True only when all 8 sections failed OR
+          when the final assembled markdown still fails
+          ``validate_briefing_markdown`` (last-resort safety net).
+        """
+        sections: list[str | None] = [None] * len(TEMPLATE_SECTIONS)
+        failed_indices: list[int] = []
+
+        for idx in LLM_SECTION_INDICES:
+            section = await self._compose_section(payload, idx, log)
+            if section.failed:
+                failed_indices.append(idx)
+                sections[idx] = section.text
+            else:
+                sections[idx] = section.text
+
+        # SİSTEM LOG is always deterministic · also reports the failed
+        # indices so the operator sees what fell back to stubs.
+        sections[SYSTEM_LOG_SECTION_IDX] = build_system_log_section(
+            payload, failed_indices
+        )
+
+        markdown = f"{DOCUMENT_TITLE}\n\n" + "\n\n".join(
+            s for s in sections if s is not None
+        )
+
+        # Final safety net · should pass by construction.
+        final_errors = validate_briefing_markdown(markdown)
+        if final_errors:
             log.warning(
-                "writer_validator_failed",
-                attempt=attempt,
-                errors=errors[:3],
+                "writer_final_validation_failed",
+                errors=final_errors[:3],
+                sections_failed=failed_indices,
             )
-            prompt = self._retry_prompt(base_prompt, errors)
-        # All retries exhausted · fallback.
-        log.warning("writer_fallback", last_errors=last_errors[:3])
-        return render_fallback_briefing(payload), True
+            return (
+                render_fallback_briefing(payload),
+                True,
+                list(range(len(TEMPLATE_SECTIONS))),
+            )
+
+        # Partial-stub runs are NOT full fallback per ADR-012 amendment.
+        # SİSTEM LOG (idx 7) is always deterministic so "all 8 failed"
+        # cannot happen via the LLM path; used_fallback only flips True
+        # via the final-validator safety net above.
+        used_fallback = False
+        if failed_indices:
+            log.warning(
+                "writer_sections_fallback",
+                sections_failed=failed_indices,
+            )
+        return markdown, used_fallback, failed_indices
+
+    async def _compose_section(
+        self, payload: BriefingPayload, idx: int, log: Any
+    ) -> _SectionResult:
+        marker = TEMPLATE_SECTIONS[idx].marker
+        prefill = f"{marker}\n\n"
+
+        # Empty-section short-circuit · never call the LLM for sections
+        # whose payload has no data. The 2026-05-27 specimen showed
+        # 100% hallucination on empty sections; this path eliminates
+        # the failure mode by deciding deterministically.
+        if _is_section_empty(payload, idx):
+            log.info("writer_section_empty_short_circuit", section_idx=idx)
+            return _SectionResult(
+                text=f"{prefill}{EMPTY_SECTION_NOTE_TR}\n",
+                failed=False,
+            )
+
+        try:
+            body = await self._llm.generate_with_prefill(
+                system=build_writer_system(),
+                user=build_section_user(payload, idx),
+                prefill=prefill,
+                **self._llm_kwargs(),
+            )
+        except Exception as exc:
+            log.warning(
+                "writer_section_llm_error",
+                section_idx=idx,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return _SectionResult(text=render_section_stub(idx), failed=True)
+
+        full = prefill + body
+        if not validate_section(full, idx):
+            log.warning(
+                "writer_section_validation_failed",
+                section_idx=idx,
+                preview=body[:120],
+            )
+            return _SectionResult(text=render_section_stub(idx), failed=True)
+        return _SectionResult(text=full, failed=False)
 
     def _llm_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -140,18 +251,6 @@ class Briefer:
         if self._writer_model is not None:
             kwargs["model"] = self._writer_model
         return kwargs
-
-    def _retry_prompt(self, base_prompt: str, errors: list[str]) -> str:
-        if not errors:
-            return base_prompt
-        complaint = "\n".join(f"- {e}" for e in errors[:5])
-        return (
-            base_prompt
-            + "\n\nÖNCEKİ DENEMEDE ŞABLON DOĞRULAYICI HATA VERDİ:\n"
-            + complaint
-            + "\nLütfen şablon yapısını korumayı tekrar dene. Aynı bölüm "
-            "başlıklarını harfi harfine kullan."
-        )
 
     # ── Persistence ─────────────────────────────────────────────────────
 
@@ -200,7 +299,13 @@ class Briefer:
 
     # ── stages_done ─────────────────────────────────────────────────────
 
-    def _mark_stage_done(self, run_id: str, *, used_fallback: bool) -> None:
+    def _mark_stage_done(
+        self,
+        run_id: str,
+        *,
+        used_fallback: bool,
+        sections_failed: list[int],
+    ) -> None:
         row = self._conn.execute(
             "SELECT stages_done, counts FROM pipeline_runs WHERE run_id = ?",
             [run_id],
@@ -210,16 +315,74 @@ class Briefer:
         if "write" not in stages:
             stages.append("write")
         counts["writer_used_fallback"] = used_fallback
+        counts["writer_sections_fallback"] = list(sections_failed)
         self._conn.execute(
             "UPDATE pipeline_runs SET stages_done = ?, counts = ? WHERE run_id = ?",
             [json.dumps(stages), json.dumps(counts), run_id],
         )
 
 
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+
+class _SectionResult:
+    """One section's outcome · (text, failed).
+
+    ``text`` is what gets concatenated into the briefing markdown ·
+    either the LLM body with prefilled marker, or the canonical empty
+    note, or ``render_section_stub`` output.
+
+    ``failed`` is True ONLY when the LLM was called and produced
+    unusable output (validation failed or raised). Empty short-circuits
+    are not failures · they are the correct deterministic answer.
+    """
+
+    __slots__ = ("text", "failed")
+
+    def __init__(self, text: str, failed: bool) -> None:
+        self.text = text
+        self.failed = failed
+
+
+def _is_section_empty(payload: BriefingPayload, idx: int) -> bool:
+    """True when section idx has no payload data.
+
+    Empty sections must not call the LLM · the 2026-05-27 hallucinated
+    specimen confirmed Trendyol-LLM 7B invents content rather than
+    emitting the empty-state phrase reliably.
+    """
+    if idx == 0:  # DEFCON 1-2 ÖNCELİKLİ
+        return not _has_clusters_in(payload, BUCKET_PRIORITY)
+    if idx == 1:  # DEFCON 3 MATERYAL
+        return not _has_clusters_in(payload, BUCKET_MATERIAL)
+    if idx == 2:  # AÇIK GELİŞMELER · DEVAM EDEN TAKİP
+        return not payload.open_arc_updates
+    if idx == 3:  # DEFCON 4 GÜNDEM
+        return not _has_clusters_in(payload, BUCKET_ROUTINE)
+    if idx == 4:  # DİKKAT · YALNIZCA SOSYALDE
+        for levels in (BUCKET_PRIORITY, BUCKET_MATERIAL, BUCKET_ROUTINE):
+            for level in levels:
+                for cluster in payload.clusters_by_defcon.get(level, []):
+                    if cluster.is_social_only:
+                        return False
+        return True
+    if idx == 5:  # AMBİYANS · DEFCON 5
+        return not _has_clusters_in(payload, BUCKET_AMBIENT)
+    if idx == 6:  # KAPATILAN HİKAYELER
+        return not payload.resolved_arcs
+    return False
+
+
+def _has_clusters_in(
+    payload: BriefingPayload, levels: tuple[int, ...]
+) -> bool:
+    return any(payload.clusters_by_defcon.get(level) for level in levels)
+
+
 __all__ = [
     "DEFAULT_BRIEFINGS_ROOT",
-    "DEFAULT_MAX_RETRIES",
     "DEFAULT_WRITER_MAX_TOKENS",
     "DEFAULT_WRITER_TEMPERATURE",
+    "EMPTY_SECTION_NOTE_TR",
     "Briefer",
 ]

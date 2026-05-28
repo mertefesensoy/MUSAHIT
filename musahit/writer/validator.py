@@ -9,9 +9,25 @@ The validator is intentionally tight on **structural** discipline
 any prose length). If the writer drifts on structure the prompt is
 retried; if the writer drifts on content the operator sees it but
 parsing still works.
+
+Per-section validation (``validate_section``) is stricter on content
+than the whole-briefing validator. After the 2026-05-27 hallucinated
+specimen showed Trendyol-LLM 7B echoing DISCIPLINE_RULES verbatim into
+DİKKAT and emitting "Adım 1:" / "Gerekçe:" chain-of-thought scaffolding
+into AMBİYANS, the section validator now rejects:
+
+* Prompt echo · any DISCIPLINE_RULES / "BÖLÜM VERİSİ" / "ÇIKTI" /
+  "GÖREV ·" marker substring in the body.
+* Chain-of-thought scaffolding · lines matching ``^\\s*Adım\\s*\\d+:``
+  or ``^\\s*Gerekçe\\s*:`` (Turkish CoT).
+
+Rejected sections become honest stubs via ``render_section_stub`` ·
+the briefing never ships fabricated, echoed, or CoT-scaffolded content.
 """
 
 from __future__ import annotations
+
+import re
 
 from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
 
@@ -25,6 +41,27 @@ EXTRA_SECTION_ALLOWED_PREFIX: str = "## ❯ "
 # matching only the opening "[içerik buraya" keeps the check robust
 # against any future tweak to the instruction trailer.
 _PLACEHOLDER_ECHO_SUBSTRING: str = "[içerik buraya"
+
+# Substrings that, when present in a section body, indicate the model
+# echoed the per-section prompt back instead of producing content. All
+# come from the 2026-05-27 hallucinated specimen. Each is rare enough
+# in legitimate Turkish prose that a false positive is implausible.
+_PROMPT_ECHO_MARKERS: tuple[str, ...] = (
+    "KURALLAR (ADR-009)",
+    "BÖLÜM VERİSİ:",
+    "ÇIKTI (yalnızca",
+    "GÖREV ·",
+    "Hedef bölüm ·",
+)
+
+# Chain-of-thought scaffolding patterns (Turkish). The hallucinated
+# specimen emitted "Adım 1: ..." / "Gerekçe: ..." into AMBİYANS as if
+# the model were showing its work. Any line whose first non-blank
+# content matches these prefixes is CoT leak · reject the section.
+_COT_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*Adım\s*\d+\s*:", re.MULTILINE),
+    re.compile(r"^\s*Gerekçe\s*:", re.MULTILINE),
+)
 
 
 def validate_briefing_markdown(text: str) -> list[str]:
@@ -100,10 +137,23 @@ def validate_briefing_markdown(text: str) -> list[str]:
 def validate_section(text: str, section_idx: int) -> bool:
     """Per-section validator.
 
-    Pass conditions:
+    Pass conditions (structural):
     - First non-blank line is TEMPLATE_SECTIONS[section_idx].marker
     - No other lines starting with '## ❯' appear in the text
     - Text contains at least one non-marker non-empty line
+
+    Reject conditions (content · added 2026-05-28 after the
+    hallucinated specimen review):
+    - Text contains any DISCIPLINE_RULES / per-section prompt marker
+      substring (``_PROMPT_ECHO_MARKERS``) · the model echoed the prompt
+      back instead of producing content.
+    - Text contains any chain-of-thought line (``Adım N:`` /
+      ``Gerekçe:``) · CoT scaffolding must not ship in the briefing.
+    - Text contains the old single-placeholder fragment
+      (``[içerik buraya``) · 2026-05-23 placeholder-echo bug.
+
+    A rejected section is replaced with ``render_section_stub`` by the
+    Briefer; the operator sees an honest stub, never fabricated prose.
     """
     if not text or not text.strip():
         return False
@@ -119,7 +169,25 @@ def validate_section(text: str, section_idx: int) -> bool:
         line for line in lines
         if line.strip() and line.strip() != expected_marker
     ]
-    return bool(content_lines)
+    if not content_lines:
+        return False
+
+    body = "\n".join(content_lines)
+
+    # Reject prompt echo · the body must not carry DISCIPLINE_RULES /
+    # per-section prompt markers verbatim.
+    for marker in _PROMPT_ECHO_MARKERS:
+        if marker in body:
+            return False
+
+    # Reject chain-of-thought scaffolding · the model should produce
+    # the briefing section, not show its reasoning.
+    for pattern in _COT_LINE_PATTERNS:
+        if pattern.search(body):
+            return False
+
+    # Reject the historical placeholder echo from the 2026-05-23 bug.
+    return _PLACEHOLDER_ECHO_SUBSTRING not in body
 
 
 __all__ = [
