@@ -124,23 +124,96 @@ class Clusterer:
         embeddable = [a for a in articles if a.word_count >= MIN_WORD_COUNT_FOR_EMBEDDING]
         skipped_empty = len(articles) - len(embeddable)
 
+        # Empty-input fast path · no eligible articles this run means
+        # nothing to embed and nothing to cluster. The stage marks done
+        # cleanly · this is the steady-state idempotent re-run case.
+        if not embeddable:
+            self._mark_stage_done(run_id, new_clusters=0, joins=0)
+            log.info(
+                "cluster_done",
+                new=0,
+                joined=0,
+                skipped_headline=0,
+                skipped_empty=skipped_empty,
+            )
+            return {
+                "new_clusters": 0,
+                "joins": 0,
+                "skipped_headline": 0,
+                "skipped_empty": skipped_empty,
+            }
+
         vectors = await self._embed_articles(embeddable)
-        if len(vectors) != len(embeddable):
+
+        # Total-failure guard (Issue 1) · _embed_articles' wrapper
+        # returned [] because the embed call raised at the transport
+        # level (Ollama unreachable). Distinguish from "successfully
+        # embedded zero" which Solution B no longer produces · the
+        # embedder now returns one slot per input.
+        if embeddable and not vectors:
             log.warning(
                 "cluster_embed_incomplete",
+                expected=len(embeddable),
+                got=0,
+            )
+            raise EmbeddingUnavailableError(
+                f"embedding returned 0 vectors for {len(embeddable)} "
+                f"articles · cluster stage cannot proceed"
+            )
+
+        # Length contract · Solution B requires the embedder to return
+        # one slot per input (a vector or None). Anything else is a
+        # contract violation · fail loudly.
+        if len(vectors) != len(embeddable):
+            log.error(
+                "cluster_embed_contract_violation",
                 expected=len(embeddable),
                 got=len(vectors),
             )
             raise EmbeddingUnavailableError(
-                f"embedding returned {len(vectors)} vectors for "
-                f"{len(embeddable)} articles · cluster stage cannot proceed"
+                f"embedder returned {len(vectors)} vectors for "
+                f"{len(embeddable)} articles · alignment broken"
             )
-        self._persist_embeddings(embeddable, vectors)
+
+        # Solution B · partial alignment. Filter Nones to obtain the
+        # (article, vector) tuples that can actually be clustered. The
+        # Nones are the bge-m3-poison articles (or transport/validation
+        # failures); they are dropped this run · their article rows
+        # remain WITHOUT an embedding so a later re-run picks them up.
+        embedded_pairs: list[tuple[_Article, list[float]]] = [
+            (a, v)
+            for a, v in zip(embeddable, vectors, strict=True)
+            if v is not None
+        ]
+        dropped = len(embeddable) - len(embedded_pairs)
+        if dropped:
+            dropped_ids = [
+                a.id
+                for a, v in zip(embeddable, vectors, strict=True)
+                if v is None
+            ]
+            log.warning(
+                "cluster_embed_partial",
+                dropped=dropped,
+                clustered=len(embedded_pairs),
+                dropped_ids=dropped_ids[:20],
+            )
+        if not embedded_pairs:
+            raise EmbeddingUnavailableError(
+                f"all {len(embeddable)} articles failed to embed · "
+                f"cluster cannot proceed"
+            )
+
+        # Persist embeddings ONLY for the successful pairs.
+        self._persist_embeddings(
+            [a for a, _ in embedded_pairs],
+            [v for _, v in embedded_pairs],
+        )
 
         # Phase 2: language-partitioned greedy single-pass.
         # bucket → ordered list of (article, vector) tuples by published_at.
         buckets: dict[str, list[tuple[_Article, list[float]]]] = {}
-        for a, v in zip(embeddable, vectors, strict=True):
+        for a, v in embedded_pairs:
             buckets.setdefault(a.language, []).append((a, v))
         for items in buckets.values():
             items.sort(key=lambda pair: pair[0].published_at)
@@ -242,14 +315,15 @@ class Clusterer:
 
     async def _embed_articles(
         self, articles: list[_Article]
-    ) -> list[list[float]]:
+    ) -> list[list[float] | None]:
         """Build the embedding inputs and call the embedder.
 
-        The embedder owns its own batching (per ADR-002 the production
-        Ollama client batches in chunks). On total failure we return
-        ``[]``; the ``run`` length-mismatch guard then raises
-        :class:`EmbeddingUnavailableError` so the cluster stage fails
-        cleanly and remains re-runnable.
+        Returns the embedder's aligned ``list[list[float] | None]``
+        directly · Nones at positions where a single article could not
+        be embedded (Solution B). On a TOTAL embed exception (Ollama
+        unreachable, etc.) returns ``[]`` so ``run()``'s Issue-1 guard
+        can raise :class:`EmbeddingUnavailableError` cleanly · do NOT
+        swallow per-item Nones, they are normal Solution-B output.
         """
         texts = [self._embedding_input(a) for a in articles]
         if not texts:

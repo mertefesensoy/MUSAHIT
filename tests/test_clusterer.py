@@ -444,22 +444,58 @@ class _FailingEmbeddingClient:
     explicit EmbeddingUnavailableError BEFORE the zip runs.
     """
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
         raise RuntimeError("simulated embedder failure (HTTP 500)")
 
 
 class _ShortEmbeddingClient:
     """Embedder stand-in that returns fewer vectors than inputs.
 
-    Mirrors the "partial result with no None markers" failure mode ·
-    the strict zip would crash, the guard catches it first.
+    Pre-Solution-B this exercised the original length-mismatch guard.
+    Post-Solution-B the embedder's contract is one slot per input ·
+    returning fewer items is a contract violation and the clusterer's
+    guard now reports it with a clearer "alignment broken" message.
     """
 
     def __init__(self, return_count: int) -> None:
         self._return_count = return_count
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
         return [[0.0] * DIMENSION for _ in range(self._return_count)]
+
+
+class _PartialEmbeddingClient:
+    """Embedder stand-in that returns valid vectors except at a None index.
+
+    Models the Solution-B path: bge-m3 hits a poison input, the embedder
+    returns None at that position. Subsequent positions get valid
+    vectors so the clusterer can proceed on the partial subset.
+    """
+
+    def __init__(self, none_indices: set[int]) -> None:
+        self._none_indices = none_indices
+
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
+        # Use FakeEmbeddingClient for the valid vectors so each text
+        # gets a deterministic, similarity-preserving embedding · None
+        # at the designated indices.
+        fake = FakeEmbeddingClient()
+        valid = await fake.embed(texts)
+        out: list[list[float] | None] = []
+        for i, v in enumerate(valid):
+            out.append(None if i in self._none_indices else v)
+        return out
+
+
+class _AllNoneEmbeddingClient:
+    """Embedder stand-in that returns None for every input.
+
+    Models the worst-case Solution-B path: every article poisoned. The
+    clusterer must raise EmbeddingUnavailableError because there is
+    literally nothing to cluster."""
+
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
+        return [None] * len(texts)
 
 
 class TestEmbedFailureRaisesClearError:
@@ -552,6 +588,164 @@ class TestEmbedFailureRaisesClearError:
         ).fetchone()
         stages = json.loads(row[0])
         assert "cluster" in stages
+
+
+# ── TestSolutionBPartialAlignment (2026-05-28) ─────────────────────────────
+
+
+class TestSolutionBPartialAlignment:
+    async def test_partial_embed_clusters_successful_subset(
+        self,
+        ingest_db: duckdb.DuckDBPyConnection,
+    ) -> None:
+        """Mock embedder returns one None · the rest get valid vectors.
+        Clusterer must proceed on the successful subset · log
+        cluster_embed_partial with the dropped id · mark the stage done.
+
+        This is the Solution-B happy path: one bge-m3-poison article is
+        dropped, the other articles still cluster, the briefing for the
+        day still has data.
+
+        Log capture uses ``structlog.testing.capture_logs`` so the
+        assertion is robust against the project's structlog/stdlib
+        configuration whether or not ``configure_logging`` ran first."""
+        poison_id = _short_id("poison")
+        _insert_article(
+            ingest_db,
+            article_id=poison_id,
+            source_id="bianet",
+            title="Sezon açıldı",
+            body=_body(["bayram", "tatil", "sezon", "ünlü", "isimler"]),
+        )
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("good1"),
+            source_id="cumhuriyet",
+            title="Ekonomi haberi",
+            body=_body(EC_BAG),
+            published_at=datetime(2026, 5, 23, 9, 0, 0),
+        )
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("good2"),
+            source_id="bianet",
+            title="Diğer ekonomi haberi",
+            body=_body(EC_BAG),
+            published_at=datetime(2026, 5, 23, 10, 0, 0),
+        )
+
+        # Order of articles returned by _select_eligible is not guaranteed
+        # by the SQL but is stable for a given run · we pin the embedder
+        # to mark whichever index corresponds to the poison article as
+        # None by string-matching the embedder input.
+        class _PoisonByTextEmbedder:
+            async def embed(self, texts: list[str]) -> list[list[float] | None]:
+                fake = FakeEmbeddingClient()
+                vectors = await fake.embed(texts)
+                out: list[list[float] | None] = []
+                for text, vec in zip(texts, vectors, strict=True):
+                    if "Sezon açıldı" in text:
+                        out.append(None)
+                    else:
+                        out.append(vec)
+                return out
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as captured:
+            result = await Clusterer(ingest_db, _PoisonByTextEmbedder()).run("run_test")
+
+        # 2 good articles clustered (1 cluster each since they share an
+        # EC_BAG vocabulary heavily · join into 1 cluster).
+        # Verify the stage MARKED DONE (not raised).
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" in stages
+
+        # cluster_embed_partial logged with the poison id.
+        partial_events = [
+            e for e in captured if e.get("event") == "cluster_embed_partial"
+        ]
+        assert partial_events, (
+            f"expected cluster_embed_partial event · captured events: "
+            f"{[e.get('event') for e in captured]}"
+        )
+        partial = partial_events[0]
+        assert partial.get("dropped") == 1
+        assert poison_id in (partial.get("dropped_ids") or [])
+
+        # The poison article was NOT persisted in article_embeddings.
+        embedded_ids = {
+            row[0] for row in ingest_db.execute(
+                "SELECT article_id FROM article_embeddings"
+            ).fetchall()
+        }
+        assert poison_id not in embedded_ids
+        assert _short_id("good1") in embedded_ids
+        assert _short_id("good2") in embedded_ids
+
+        # Result counts reflect only the successful clustering.
+        assert result["new_clusters"] >= 1
+
+    async def test_all_none_raises_embedding_unavailable(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Embedder returns None for every input · no pairs to cluster
+        · EmbeddingUnavailableError surfaces · cluster NOT in
+        stages_done (re-runnable)."""
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("a1"),
+            source_id="bianet",
+            title="t",
+            body=_body(EC_BAG),
+        )
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("a2"),
+            source_id="cumhuriyet",
+            title="t2",
+            body=_body(EC_BAG),
+            published_at=datetime(2026, 5, 23, 9, 0, 0),
+        )
+
+        with pytest.raises(EmbeddingUnavailableError) as exc_info:
+            await Clusterer(ingest_db, _AllNoneEmbeddingClient()).run("run_test")
+
+        msg = str(exc_info.value)
+        assert "all 2 articles failed to embed" in msg
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" not in stages
+
+    async def test_total_failure_returns_empty_still_raises(
+        self, ingest_db: duckdb.DuckDBPyConnection
+    ) -> None:
+        """Issue-1 behavior preserved · the embedder raising (Ollama
+        unreachable) still triggers the total-failure guard with the
+        clean re-runnable error."""
+        _insert_article(
+            ingest_db,
+            article_id=_short_id("a"),
+            source_id="bianet",
+            title="t",
+            body=_body(EC_BAG),
+        )
+
+        with pytest.raises(EmbeddingUnavailableError) as exc_info:
+            await Clusterer(ingest_db, _FailingEmbeddingClient()).run("run_test")
+
+        assert "0 vectors" in str(exc_info.value)
+        assert "1 articles" in str(exc_info.value)
+        # Still re-runnable.
+        row = ingest_db.execute(
+            "SELECT stages_done FROM pipeline_runs WHERE run_id = 'run_test'"
+        ).fetchone()
+        stages = json.loads(row[0])
+        assert "cluster" not in stages
 
 
 # ── TestDefaultThreshold ───────────────────────────────────────────────────

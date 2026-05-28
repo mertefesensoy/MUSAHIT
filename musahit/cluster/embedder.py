@@ -9,6 +9,16 @@ Per ADR-002, the production embedder is bge-m3 served by a local Ollama
 instance on ``http://localhost:11434``. Embeddings are 1024-dimensional
 floats; the cluster_embeddings / article_embeddings columns are
 ``FLOAT[1024]`` (ADR-006).
+
+Return-type contract · ``embed()`` returns ``list[list[float] | None]``
+of the SAME LENGTH as the input ``texts``. A value of ``None`` at
+position *i* signals "this single input could not be embedded" · the
+clusterer treats those positions as drops and clusters the rest. This
+is Solution B from the 2026-05-28 NaN-poison-article incident: bge-m3
+emits NaN for one specific clean input, Ollama 500s on serializing it,
+and the only robust fix is per-item partial alignment. Total transport
+failures (Ollama down) still propagate as exceptions · the clusterer's
+Issue-1 guard turns them into a clean re-runnable stage failure.
 """
 
 from __future__ import annotations
@@ -41,9 +51,17 @@ DEFAULT_BACKOFF_BASE_SECONDS: float = 2.0
 
 
 class EmbeddingClient(Protocol):
-    """Async embedding API. Returns one 1024-dim vector per input text."""
+    """Async embedding API.
 
-    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+    Returns one slot per input text. The slot is a 1024-dim vector when
+    the embedding succeeded · ``None`` when the embedder could not
+    produce a usable vector for that specific input (per-item failure).
+    Total transport failures (Ollama unreachable, etc.) surface as
+    exceptions; the per-item ``None`` path covers per-item model
+    failures (NaN/Inf/wrong-dim/all-zeros).
+    """
+
+    async def embed(self, texts: list[str]) -> list[list[float] | None]: ...
 
 
 # ── Ollama implementation ──────────────────────────────────────────────────
@@ -58,10 +76,21 @@ class OllamaEmbeddingClient:
     after the 2026-05-28 OOM incident, down from 50). Each batch is
     retried with exponential backoff on transient errors (HTTP 5xx,
     timeout, connection); a batch that still fails after retries is
-    halved recursively down to single items. A single item that fails
-    every retry raises an :class:`httpx.HTTPError` (or the originating
-    exception) so the Clusterer's guard surfaces a clean
-    EmbeddingUnavailableError.
+    halved recursively down to single items.
+
+    Per-item failure path (Solution B · 2026-05-28) · a SINGLE-item
+    batch that still fails after retries returns ``[None]`` for that
+    position instead of raising. Combined with halving's left+right
+    reassembly, this preserves alignment: the ``None`` lands at the
+    exact original index. The clusterer then drops that article and
+    clusters the rest. Total transport failures (Ollama unreachable)
+    still raise so the Issue-1 guard fires a clean stage failure.
+
+    Vector validation · every vector returned by Ollama is passed
+    through :func:``_is_valid_vector``. Invalid vectors (wrong
+    dimension, NaN/Inf, all-zeros) are coerced to ``None`` defensively
+    so the clusterer never sees a corrupt embedding even if a future
+    Ollama version coerces NaN to null in the JSON response.
 
     Order preservation: batches are processed sequentially; halving
     splits a slice in place and recursively embeds each half, then
@@ -87,7 +116,7 @@ class OllamaEmbeddingClient:
         self._backoff_base_seconds = backoff_base_seconds
         self._injected_client = client
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
         if not texts:
             return []
 
@@ -98,8 +127,8 @@ class OllamaEmbeddingClient:
 
     async def _embed_with(
         self, client: httpx.AsyncClient, texts: list[str]
-    ) -> list[list[float]]:
-        out: list[list[float]] = []
+    ) -> list[list[float] | None]:
+        out: list[list[float] | None] = []
         for start in range(0, len(texts), self._batch_size):
             batch = texts[start : start + self._batch_size]
             vectors = await self._embed_batch_resilient(client, batch)
@@ -108,23 +137,29 @@ class OllamaEmbeddingClient:
 
     async def _embed_batch_resilient(
         self, client: httpx.AsyncClient, batch: list[str]
-    ) -> list[list[float]]:
+    ) -> list[list[float] | None]:
         """Try the batch with retries; on persistent failure, halve and recurse.
 
-        Recursive base case: a single-item batch that still fails after
-        all retries · re-raises the last exception so the caller's
-        length-mismatch guard fires.
+        Recursive base case · a single-item batch that still fails after
+        all retries returns ``[None]`` for that position. Halving's
+        ``left + right`` reassembly keeps the None at the input index.
+
+        Multi-item base case · raises so the caller can halve. The
+        halving loop is what eventually drives a poison item down to a
+        single-item batch where the None substitution fires.
         """
         try:
             return await self._embed_batch_with_retry(client, batch)
         except Exception as exc:
             if len(batch) <= 1:
+                reason = _classify_failure_reason(exc)
                 _log.warning(
-                    "embed_item_failed",
+                    "embed_item_skipped",
                     item_index_in_batch=0,
+                    reason=reason,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                raise
+                return [None]
             mid = len(batch) // 2
             _log.warning(
                 "embed_batch_halved",
@@ -139,8 +174,16 @@ class OllamaEmbeddingClient:
 
     async def _embed_batch_with_retry(
         self, client: httpx.AsyncClient, batch: list[str]
-    ) -> list[list[float]]:
-        """One batch · 1 + max_retries attempts · exponential backoff."""
+    ) -> list[list[float] | None]:
+        """One batch · 1 + max_retries attempts · exponential backoff.
+
+        Returns ``list[list[float] | None]`` of length ``len(batch)``
+        on success · individual positions may already be ``None`` from
+        the per-vector validation in ``_post_batch``. On retry
+        exhaustion this method still RAISES so the halving layer can
+        split the batch · only the single-item base case in
+        ``_embed_batch_resilient`` substitutes ``[None]``.
+        """
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -168,7 +211,14 @@ class OllamaEmbeddingClient:
 
     async def _post_batch(
         self, client: httpx.AsyncClient, batch: list[str]
-    ) -> list[list[float]]:
+    ) -> list[list[float] | None]:
+        """POST the batch · return validated vectors (None for invalid).
+
+        Defensive vector validation runs on every returned embedding so
+        a future Ollama that returns 200 with NaN coerced to null/0
+        still produces a clean ``None`` rather than feeding a corrupt
+        vector to the clusterer.
+        """
         response = await client.post(
             f"{self._base_url}/api/embed",
             json={"model": self._model, "input": batch},
@@ -176,7 +226,29 @@ class OllamaEmbeddingClient:
         )
         response.raise_for_status()
         data: dict[str, Any] = response.json()
-        return data["embeddings"]
+        raw_vectors = data.get("embeddings") or []
+        validated: list[list[float] | None] = []
+        for i, vec in enumerate(raw_vectors):
+            if _is_valid_vector(vec):
+                validated.append(list(vec))
+            else:
+                reason = _classify_vector_reason(vec)
+                _log.warning(
+                    "embed_item_skipped",
+                    item_index_in_batch=i,
+                    reason=reason,
+                )
+                validated.append(None)
+        # Pad with None if the server returned fewer items than we sent
+        # (defensive · should not happen with the modern endpoint).
+        while len(validated) < len(batch):
+            _log.warning(
+                "embed_item_skipped",
+                item_index_in_batch=len(validated),
+                reason="missing_in_response",
+            )
+            validated.append(None)
+        return validated
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -189,6 +261,76 @@ def _is_retryable(exc: Exception) -> bool:
         status = exc.response.status_code
         return status >= 500 or status in (408, 429)
     return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _is_valid_vector(vec: Any) -> bool:
+    """Return True only for a usable embedding vector.
+
+    Rejects · ``None`` · empty list · wrong dimension · any NaN/Inf
+    component · all-zeros (degenerate). The all-zeros check catches a
+    Future-Ollama-coerces-NaN-to-0 scenario where every component is
+    silently zeroed · such a vector clusters with nothing useful and
+    pollutes centroids, so we treat it as a failure.
+    """
+    if vec is None:
+        return False
+    if not isinstance(vec, (list, tuple)):
+        return False
+    if len(vec) != DIMENSION:
+        return False
+    any_nonzero = False
+    for x in vec:
+        if not isinstance(x, (int, float)):
+            return False
+        if math.isnan(x) or math.isinf(x):
+            return False
+        if x != 0.0:
+            any_nonzero = True
+    return any_nonzero
+
+
+def _classify_vector_reason(vec: Any) -> str:
+    """Map an invalid vector to a structured reason string for logs."""
+    if vec is None:
+        return "none_returned"
+    if not isinstance(vec, (list, tuple)) or len(vec) == 0:
+        return "empty_or_non_list"
+    if len(vec) != DIMENSION:
+        return "wrong_dim"
+    for x in vec:
+        if isinstance(x, float):
+            if math.isnan(x):
+                return "nan_in_vector"
+            if math.isinf(x):
+                return "inf_in_vector"
+    if not any(vec):
+        return "all_zeros"
+    return "unknown"
+
+
+def _classify_failure_reason(exc: Exception) -> str:
+    """Map a per-item retry-exhausted exception to a reason string.
+
+    ``http_500_nan`` covers the bge-m3 NaN-serialization incident · the
+    body contains the literal ``json: unsupported value: NaN`` from
+    Ollama's response writer. Other 5xx fall back to
+    ``exhausted_retries``.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            body = exc.response.text or ""
+        except Exception:
+            body = ""
+        if "NaN" in body or "unsupported value" in body:
+            return "http_500_nan"
+        if exc.response.status_code >= 500:
+            return "exhausted_retries"
+        return f"http_{exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.TransportError):
+        return "transport_error"
+    return "exhausted_retries"
 
 
 # ── Fake (testing) implementation ──────────────────────────────────────────
@@ -217,7 +359,11 @@ class FakeEmbeddingClient:
     def __init__(self, dimension: int = DIMENSION) -> None:
         self._dimension = dimension
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float] | None]:
+        # The fake never fails per-item · it always returns a vector.
+        # Returning the wider ``list[float] | None`` here satisfies the
+        # Solution-B Protocol contract so the fake remains a drop-in
+        # replacement for OllamaEmbeddingClient in clusterer tests.
         return [self._embed_one(t) for t in texts]
 
     def _embed_one(self, text: str) -> list[float]:
@@ -243,4 +389,5 @@ __all__ = [
     "EmbeddingClient",
     "FakeEmbeddingClient",
     "OllamaEmbeddingClient",
+    "_is_valid_vector",
 ]
