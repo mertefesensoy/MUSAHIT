@@ -134,19 +134,56 @@ class TestBuildPayload:
         # Peak DEFCON = lowest integer (most severe) across the bucket.
         assert payload.peak_defcon == int(DEFCON.SEVERE)
 
-    def test_open_arcs_only_when_linked_to_today_clusters(
+    def test_open_arc_updates_includes_all_open_arcs(
         self, db: duckdb.DuckDBPyConnection
     ) -> None:
+        # 2026-05-29 Group-A: AÇIK GELİŞMELER surfaces ALL open arcs, not
+        # just those a cluster touched this run · that older filter hid
+        # DORMANT arcs (idle 2-6 days, no new cluster today), which is
+        # exactly the recency the brief wants shown. Both open arcs appear.
         _seed_arc(db, "arc_today", ArcState.OPEN)
         _seed_arc(db, "arc_other", ArcState.OPEN)
         _seed_cluster(
             db, "cl1", int(DEFCON.MATERIAL), ["bianet"], arc_id="arc_today"
         )
         payload = build_payload(db, RUN_ID)
-        ids = [a.id for a in payload.open_arc_updates]
+        ids = {a.id for a in payload.open_arc_updates}
         assert "arc_today" in ids
-        # arc_other has no cluster from this run → not in updates
-        assert "arc_other" not in ids
+        assert "arc_other" in ids
+
+    def test_open_arc_freshness_classified_against_briefing_date(
+        self, db: duckdb.DuckDBPyConnection
+    ) -> None:
+        from datetime import timedelta
+
+        from musahit.arcs.freshness import Freshness
+
+        # Fresh (today), dormant (3d), expired (8d) open arcs.
+        for aid, age in (("a_fresh", 0), ("a_dormant", 3), ("a_expired", 8)):
+            db.execute(
+                "INSERT INTO arcs (id, created_at, headline, summary, state, "
+                "last_update_at, category, peak_defcon, entity_set) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    aid,
+                    NOW - timedelta(days=age + 1),
+                    f"H-{aid}",
+                    f"S-{aid}",
+                    ArcState.OPEN.value,
+                    NOW - timedelta(days=age),
+                    "POLİTİKA",
+                    int(DEFCON.MATERIAL),
+                    json.dumps([]),
+                ],
+            )
+        payload = build_payload(db, RUN_ID, target_date=NOW.date())
+        by_id = {a.id: a for a in payload.open_arc_updates}
+        assert by_id["a_fresh"].freshness == Freshness.FRESH.value
+        assert by_id["a_fresh"].days_since_last_update == 0
+        assert by_id["a_dormant"].freshness == Freshness.DORMANT.value
+        assert by_id["a_dormant"].days_since_last_update == 3
+        assert by_id["a_expired"].freshness == Freshness.EXPIRED.value
+        assert by_id["a_expired"].days_since_last_update == 8
 
     def test_resolved_arcs_listed_when_resolved_today(
         self, db: duckdb.DuckDBPyConnection

@@ -27,6 +27,7 @@ from typing import Any
 
 import duckdb
 
+from musahit.arcs.freshness import Freshness, freshness_from_days
 from musahit.common.types import ArcState, IngestStatus
 from musahit.score.defcon import DEFCON
 
@@ -42,7 +43,14 @@ BUCKET_AMBIENT: tuple[int, ...] = (5,)
 
 @dataclass(frozen=True)
 class ClusterView:
-    """Subset of a cluster row that the writer/fallback consume."""
+    """Subset of a cluster row that the writer/fallback consume.
+
+    The trailing three freshness fields (2026-05-29 Group-A) carry the
+    recency anchor for this cluster's line in the deterministic itemized
+    sections (DEFCON 4 GÜNDEM, AMBİYANS). They default safely so legacy
+    fixtures that construct ``ClusterView`` with the original ten fields
+    keep rendering as a fresh "bugün" line.
+    """
 
     id: str
     headline: str
@@ -54,6 +62,16 @@ class ClusterView:
     arc_id: str | None
     sources: list[dict[str, str]]  # [{source_id, band}, ...]
     is_social_only: bool
+    # ── freshness fields ──
+    # last_update_at is the recency anchor: the linked arc's
+    # ``last_update_at`` when the cluster belongs to an arc, else the
+    # cluster's own ``created_at``. days_since_last_update is
+    # ``briefing_date − that date`` (calendar days, clamped ≥0); freshness
+    # is the classified state. A DEFCON-4 cluster on a 6-day-stale arc thus
+    # renders "· 6 gün önce" while a genuinely-today cluster renders "bugün".
+    last_update_at: datetime | None = None
+    days_since_last_update: int = 0
+    freshness: str = Freshness.FRESH.value
 
 
 @dataclass(frozen=True)
@@ -87,9 +105,14 @@ class ArcView:
     # show a Güncelleme · prefix, stalled arcs show an italic stalled
     # marker plus a Son güncelleme · X gün önce line.
     is_active_today: bool = False
-    # days_since_last_update is briefing_date − last_update_at.date(). Used
-    # only for the stalled-arc header; 0 for active-today (irrelevant).
+    # days_since_last_update is briefing_date − last_update_at.date(). Drives
+    # the recency suffix (bugün/dün/N gün önce) and the freshness state.
     days_since_last_update: int = 0
+    # freshness (2026-05-29 Group-A) is the surfacing state derived from
+    # days_since_last_update: FRESH (<2d), DORMANT (2-6d), EXPIRED (≥7d).
+    # The deterministic AÇIK GELİŞMELER renderer excludes EXPIRED and the
+    # TTS preprocessor drops DORMANT lines from the spoken text.
+    freshness: str = Freshness.FRESH.value
 
 
 @dataclass(frozen=True)
@@ -154,7 +177,7 @@ def build_payload(
         briefing_date = (started_at or datetime.utcnow()).date()
     stages_done = json.loads(stages_json) if stages_json else []
 
-    clusters_by_defcon = _load_clusters(conn, run_id)
+    clusters_by_defcon = _load_clusters(conn, run_id, briefing_date)
     # _load_arcs needs the briefing date (for days_since_last_update) and
     # the run window (for is_active_today). started_at is fetched again
     # inside _load_arcs against the same run_id · briefing_date is computed
@@ -193,31 +216,69 @@ def build_payload(
 # ── Internals ──────────────────────────────────────────────────────────────
 
 
+def _days_between(briefing_date: date, dt: datetime | None) -> int:
+    """Calendar days from ``dt`` to ``briefing_date``, clamped ≥0.
+
+    ``None`` → 0 (treated as today). Shared by the cluster and arc
+    loaders so the recency a cluster shows and the recency its arc shows
+    are computed identically.
+    """
+    if dt is None:
+        return 0
+    return max((briefing_date - dt.date()).days, 0)
+
+
 def _load_clusters(
-    conn: duckdb.DuckDBPyConnection, run_id: str
+    conn: duckdb.DuckDBPyConnection, run_id: str, briefing_date: date
 ) -> dict[int, list[ClusterView]]:
+    """Load this run's scored clusters, bucketed by final DEFCON.
+
+    Each cluster carries a freshness triple (2026-05-29 Group-A) used by
+    the deterministic DEFCON-4 / AMBİYANS renderers to show recency. The
+    recency anchor is the linked arc's ``last_update_at`` when the cluster
+    belongs to an arc (a routine update to a 6-day-stale thread reads
+    "6 gün önce"), else the cluster's own ``created_at`` (a brand-new
+    DEFCON-4 cluster reads "bugün"). The ``LEFT JOIN arcs`` keeps clusters
+    with no arc.
+    """
     cursor = conn.execute(
         """
         SELECT c.id, c.headline, c.summary, c.category, c.final_defcon,
-               c.confidence, c.bands_present, c.arc_id
+               c.confidence, c.bands_present, c.arc_id,
+               c.created_at, arc.last_update_at
           FROM clusters c
           JOIN cluster_articles ca ON ca.cluster_id = c.id
           JOIN articles a ON a.id = ca.article_id
           JOIN ingest_log l ON l.source_id = a.source_id AND l.run_id = ?
+          LEFT JOIN arcs arc ON arc.id = c.arc_id
          WHERE c.final_defcon IS NOT NULL
          GROUP BY c.id, c.headline, c.summary, c.category, c.final_defcon,
-                  c.confidence, c.bands_present, c.arc_id
+                  c.confidence, c.bands_present, c.arc_id,
+                  c.created_at, arc.last_update_at
          ORDER BY c.final_defcon ASC, c.id
         """,
         [run_id],
     )
     rows = cursor.fetchall()
     out: dict[int, list[ClusterView]] = {}
-    for cid, headline, summary, category, final_defcon, conf, bands_json, arc_id in rows:
+    for (
+        cid,
+        headline,
+        summary,
+        category,
+        final_defcon,
+        conf,
+        bands_json,
+        arc_id,
+        created_at,
+        arc_last_update,
+    ) in rows:
         bands = json.loads(bands_json) if bands_json else []
         sources = _load_cluster_sources(conn, cid)
         social_bands = {"social_x", "social_reddit"}
         non_social = [b for b in bands if b not in social_bands]
+        anchor = arc_last_update or created_at
+        days = _days_between(briefing_date, anchor)
         out.setdefault(int(final_defcon), []).append(
             ClusterView(
                 id=cid,
@@ -230,6 +291,9 @@ def _load_clusters(
                 arc_id=arc_id,
                 sources=sources,
                 is_social_only=bool(bands) and not non_social,
+                last_update_at=anchor,
+                days_since_last_update=days,
+                freshness=freshness_from_days(days).value,
             )
         )
     return out
@@ -288,27 +352,25 @@ def _load_arcs(
             return False
         return last_update_at >= run_started
 
-    def _days_stale(last_update_at: datetime | None) -> int:
-        if last_update_at is None:
-            return 0
-        delta = (briefing_date - last_update_at.date()).days
-        return max(delta, 0)
-
+    # All OPEN arcs surface in AÇIK GELİŞMELER — not just those a cluster
+    # touched this run (2026-05-29 Group-A). That older this-run filter
+    # hid DORMANT arcs (idle 2-6 days, no new cluster today) entirely,
+    # which is exactly the recency the brief wants shown. The freshness
+    # axis (computed below from the briefing date) decides surfacing:
+    # FRESH/DORMANT stay, EXPIRED is excluded by the renderer. After the
+    # lifecycle pass auto-resolves expired arcs, OPEN is naturally bounded
+    # to the last ``EXPIRE_DAYS`` of active threads.
     open_cursor = conn.execute(
         """
-        SELECT DISTINCT a.id, a.headline, a.summary, a.state, a.peak_defcon,
+        SELECT a.id, a.headline, a.summary, a.state, a.peak_defcon,
                a.category, a.last_update_at, a.created_at,
                a.last_update_summary, a.last_update_headline,
                a.last_update_cluster_id
           FROM arcs a
-          JOIN clusters c ON c.arc_id = a.id
-          JOIN cluster_articles ca ON ca.cluster_id = c.id
-          JOIN articles art ON art.id = ca.article_id
-          JOIN ingest_log l ON l.source_id = art.source_id AND l.run_id = ?
          WHERE a.state = ?
          ORDER BY a.peak_defcon ASC, a.id
         """,
-        [run_id, ArcState.OPEN.value],
+        [ArcState.OPEN.value],
     )
     open_arcs = [
         ArcView(
@@ -324,7 +386,8 @@ def _load_arcs(
             last_update_headline=r[9] or "",
             last_update_cluster_id=r[10],
             is_active_today=_is_active_today(r[6]),
-            days_since_last_update=_days_stale(r[6]),
+            days_since_last_update=_days_between(briefing_date, r[6]),
+            freshness=freshness_from_days(_days_between(briefing_date, r[6])).value,
         )
         for r in open_cursor.fetchall()
     ]
@@ -356,7 +419,8 @@ def _load_arcs(
             last_update_headline=r[9] or "",
             last_update_cluster_id=r[10],
             is_active_today=_is_active_today(r[6]),
-            days_since_last_update=_days_stale(r[6]),
+            days_since_last_update=_days_between(briefing_date, r[6]),
+            freshness=freshness_from_days(_days_between(briefing_date, r[6])).value,
         )
         for r in resolved_cursor.fetchall()
     ]

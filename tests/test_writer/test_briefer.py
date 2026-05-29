@@ -198,8 +198,10 @@ class TestHappyPath:
 
         result = await briefer.run(RUN_ID)
 
-        assert llm.call_count == 7
-        for i in range(7):
+        # 2026-05-29 Group-A: only DEFCON 1-2 (0) and DEFCON 3 (1) call the
+        # LLM; sections 2-6 are rendered deterministically (no LLM call).
+        assert llm.call_count == 2
+        for i in (0, 1):
             expected_prefill = f"{TEMPLATE_SECTIONS[i].marker}\n\n"
             assert llm.prefill_calls[i] == expected_prefill
         assert result["used_fallback"] is False
@@ -231,10 +233,10 @@ class TestPerSectionFailure:
         def responder(_prompt: str, _attempt: int) -> str:
             n = call_counter["n"]
             call_counter["n"] += 1
-            # Sections are invoked in idx order; the 4th LLM call is
-            # idx=3 (DEFCON 4 GÜNDEM). Make that one return a wrong
+            # LLM sections are invoked in idx order (0 then 1); the 2nd
+            # LLM call is idx=1 (DEFCON 3). Make that one return a wrong
             # header so the per-section validator rejects it.
-            if n == 3:
+            if n == 1:
                 return "## ❯ WRONG HEADER\n\nBad content"
             return VALID_SECTION_CONTENT
 
@@ -243,16 +245,16 @@ class TestPerSectionFailure:
             db, llm, briefings_root=tmp_path / "briefings"
         ).run(RUN_ID)
 
-        assert result["sections_failed"] == [3]
+        assert result["sections_failed"] == [1]
         assert result["used_fallback"] is False
         on_disk = Path(result["path"]).read_text("utf-8")
         assert "Bu bölüm üretilemedi" in on_disk
-        other_sections = [i for i in range(7) if i != 3]
+        other_sections = [i for i in range(7) if i != 1]
         for i in other_sections:
             assert TEMPLATE_SECTIONS[i].marker in on_disk
         assert "Başarısız bölüm üretimi" in on_disk
-        section_3_title = TEMPLATE_SECTIONS[3].marker.removeprefix("## ❯ ")
-        assert section_3_title in on_disk
+        section_1_title = TEMPLATE_SECTIONS[1].marker.removeprefix("## ❯ ")
+        assert section_1_title in on_disk
 
 
 # ── TestAllLlmSectionsFail ───────────────────────────────────────────────
@@ -262,9 +264,9 @@ class TestAllLlmSectionsFail:
     async def test_all_llm_sections_fail_marks_not_full_fallback(
         self, db: duckdb.DuckDBPyConnection, tmp_path: Path
     ) -> None:
-        """All 7 LLM sections fail → 7 stubs + 1 real SİSTEM LOG.
-        Per Decision 1 this is NOT full fallback since SİSTEM LOG
-        (idx 7) is deterministic and always succeeds."""
+        """Both LLM sections (0,1) fail → 2 stubs; the deterministic
+        sections (2-6) and SİSTEM LOG (7) still render, so this is NOT
+        full fallback and the assembled markdown still validates."""
         _seed_all_section_buckets(db)
 
         def responder(_prompt: str, _attempt: int) -> str:
@@ -275,7 +277,7 @@ class TestAllLlmSectionsFail:
             db, llm, briefings_root=tmp_path / "briefings"
         ).run(RUN_ID)
 
-        assert result["sections_failed"] == [0, 1, 2, 3, 4, 5, 6]
+        assert result["sections_failed"] == [0, 1]
         assert result["used_fallback"] is False
         on_disk = Path(result["path"]).read_text("utf-8")
         assert validate_briefing_markdown(on_disk) == []
@@ -437,8 +439,8 @@ class TestPrefillWiring:
         _seed_all_section_buckets(db)
         llm = FakeLlmClient(default=VALID_SECTION_CONTENT)
         await Briefer(db, llm, briefings_root=tmp_path / "briefings").run(RUN_ID)
-        assert len(llm.prefill_calls) == 7
-        for i in range(7):
+        assert len(llm.prefill_calls) == 2
+        for i in (0, 1):
             assert llm.prefill_calls[i].startswith(TEMPLATE_SECTIONS[i].marker)
 
     async def test_written_markdown_starts_with_document_title(
@@ -470,7 +472,7 @@ class TestLlmException:
             db, llm, briefings_root=tmp_path / "briefings"
         ).run(RUN_ID)
 
-        assert result["sections_failed"] == [0, 1, 2, 3, 4, 5, 6]
+        assert result["sections_failed"] == [0, 1]
         assert result["used_fallback"] is False
         assert validate_briefing_markdown(
             Path(result["path"]).read_text("utf-8")
@@ -584,6 +586,71 @@ class TestValidatorRejectsPromptEcho:
         # No CoT scaffolding leaked into the briefing.
         assert "Adım 1:" not in on_disk
         assert "Gerekçe:" not in on_disk
+
+
+class TestDeterministicSectionsNoLlmCall:
+    """2026-05-29 Group-A · the itemized sections (2-6) must render from
+    payload data with NO LLM call, so Mode-4 fabrication is impossible.
+
+    The FakeLlmClient is wired to emit a recognizable garbage marker on
+    every call; we assert (a) it was called exactly twice (idx 0,1) and
+    (b) the garbage never lands in the deterministic AÇIK GELİŞMELER /
+    AMBİYANS / DEFCON 4 sections, which instead carry itemized data with
+    recency suffixes.
+    """
+
+    async def test_itemized_sections_are_data_not_llm(
+        self, db: duckdb.DuckDBPyConnection, tmp_path: Path
+    ) -> None:
+        _seed_all_section_buckets(db)
+        garbage = "İş Bankası kredi paketi açıkladı · Guantanamo"
+
+        def responder(_prompt: str, _attempt: int) -> str:
+            # Valid-shaped LLM output (won't be rejected) but containing a
+            # fabrication marker. If any deterministic section were routed
+            # through the LLM, this marker would leak into it.
+            return f"{garbage}\n"
+
+        llm = FakeLlmClient(responder=responder)
+        result = await Briefer(
+            db, llm, briefings_root=tmp_path / "briefings"
+        ).run(RUN_ID)
+
+        # Only DEFCON 1-2 and DEFCON 3 call the LLM.
+        assert llm.call_count == 2
+
+        on_disk = Path(result["path"]).read_text("utf-8")
+        sections = _split_sections(on_disk)
+        for marker in (
+            "## ❯ AÇIK GELİŞMELER · DEVAM EDEN TAKİP",
+            "## ❯ DEFCON 4 · GÜNDEM",
+            "## ❯ AMBİYANS · DEFCON 5",
+        ):
+            assert garbage not in sections[marker], (
+                f"fabrication leaked into deterministic section {marker}"
+            )
+        # The deterministic open-arc / DEFCON-4 sections carry recency data.
+        açık = sections["## ❯ AÇIK GELİŞMELER · DEVAM EDEN TAKİP"]
+        assert "arc_open_001" in açık
+        assert "bugün" in açık
+
+
+def _split_sections(markdown: str) -> dict[str, str]:
+    """Bucket markdown body lines under their ``## ❯`` marker for assertions."""
+    out: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in markdown.splitlines():
+        if line.startswith("## ❯"):
+            if current is not None:
+                out[current] = "\n".join(buf)
+            current = line.strip()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        out[current] = "\n".join(buf)
+    return out
 
 
 def _payload_unused_just_a_check(_: BriefingPayload) -> None:  # pragma: no cover

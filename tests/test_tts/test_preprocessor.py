@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from musahit.tts.preprocessor import (
     ABBREVIATIONS,
+    ALL_DORMANT_VOICE_NOTE,
     DEFCON_TR_NUMBERS,
     preprocess_for_tts,
 )
@@ -247,6 +248,131 @@ class TestArcIdRewriting:
         out = preprocess_for_tts(text)
         assert "hikaye 1" in out
         assert "arc_20260523_0001" not in out
+
+
+# ── Dormancy skip (2026-05-29 Group-A) ─────────────────────────────────────
+
+
+class TestDormancySkip:
+    """Itemized arc lines carry a recency suffix; the voice briefing
+    drops DORMANT lines (N gün önce, N≥2) and keeps FRESH (bugün/dün)."""
+
+    def test_dormant_line_dropped(self) -> None:
+        text = (
+            "- Taze gelişme · ŞİDDETLİ · YARGI · `arc_20260529_0001` · bugün\n"
+            "- Eski gelişme · MATERYAL · POLİTİKA · `arc_20260523_0006` · 6 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Taze gelişme" in out
+        assert "Eski gelişme" not in out
+
+    def test_fresh_lines_kept(self) -> None:
+        text = (
+            "- Bugünkü olay · YARGI · `arc_20260529_0001` · bugün\n"
+            "- Dünkü olay · POLİTİKA · `arc_20260528_0002` · dün\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Bugünkü olay" in out
+        assert "Dünkü olay" in out
+
+    def test_two_days_is_dropped(self) -> None:
+        # Exactly the dormancy boundary · 2 gün önce → dropped.
+        text = "- Sınır olay · POLİTİKA · `arc_x` · 2 gün önce\n"
+        out = preprocess_for_tts(text)
+        assert "Sınır olay" not in out
+
+    def test_all_dormant_block_becomes_note(self) -> None:
+        text = (
+            "- Birinci · POLİTİKA · `arc_20260523_0001` · 6 gün önce\n"
+            "- İkinci · EKONOMİ · `arc_20260524_0002` · 5 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Birinci" not in out
+        assert "İkinci" not in out
+        assert ALL_DORMANT_VOICE_NOTE in out
+
+    def test_mixed_block_keeps_fresh_no_note(self) -> None:
+        text = (
+            "- Taze · YARGI · `arc_a` · bugün\n"
+            "- Eski · POLİTİKA · `arc_b` · 4 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Taze" in out
+        assert "Eski" not in out
+        # A surviving fresh line means NO all-dormant note.
+        assert ALL_DORMANT_VOICE_NOTE not in out
+
+    def test_prose_ending_in_gun_once_mid_sentence_not_dropped(self) -> None:
+        # Recency match is line-end anchored · a DEFCON-3 prose line that
+        # merely mentions "6 gün önce" mid-sentence must NOT be dropped.
+        text = "Olay 6 gün önce açıklandı ve hâlâ sürüyor.\n"
+        out = preprocess_for_tts(text)
+        assert "hâlâ sürüyor" in out
+
+    def test_dormancy_skip_preserves_non_arc_lines(self) -> None:
+        text = (
+            "### Önemli başlık\n"
+            "Bu bir DEFCON 3 özeti.\n"
+            "- Taze arc · YARGI · `arc_a` · bugün\n"
+            "- Eski arc · POLİTİKA · `arc_b` · 8 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Önemli başlık" in out
+        assert "Bu bir Defkon Üç özeti." in out
+        assert "Taze arc" in out
+        assert "Eski arc" not in out
+
+    def test_arc_id_rewrite_still_works_on_fresh_line(self) -> None:
+        text = "- Taze · YARGI · `arc_20260529_0007` · bugün\n"
+        out = preprocess_for_tts(text)
+        assert "hikaye 7" in out
+        assert "arc_20260529_0007" not in out
+        # Backtick stripped from the spoken text.
+        assert "`" not in out
+
+    def test_llm_prose_ending_in_gun_once_not_dropped(self) -> None:
+        # An LLM DEFCON-3 metadata line ending in "· N gün önce" is NOT a
+        # deterministic arc bullet (no leading "- ", no backtick arc id), so
+        # it must survive — the dormancy filter is scoped to arc bullets.
+        text = "**Güncelleme** · 3 gün önce\nDevam eden bir gelişme var.\n"
+        out = preprocess_for_tts(text)
+        assert "Güncelleme · 3 gün önce" in out
+        assert "Devam eden bir gelişme var." in out
+
+    def test_bullet_without_arc_id_not_dropped(self) -> None:
+        # A bullet that lacks a backtick arc id is not a deterministic arc
+        # line · it is left alone even if it ends in a recency phrase.
+        text = "- Serbest madde · 4 gün önce\n"
+        out = preprocess_for_tts(text)
+        assert "Serbest madde" in out
+
+    def test_orphaned_highlight_header_dropped_when_all_dormant(self) -> None:
+        # >10-arc highlight block whose voiced top-10 are all dormant: the
+        # "### Öne Çıkanlar" subheader must not be left stranded before the
+        # all-dormant note.
+        text = (
+            "### Öne Çıkanlar\n"
+            "\n"
+            "- Birinci · POLİTİKA · `arc_a` · 3 gün önce\n"
+            "- İkinci · EKONOMİ · `arc_b` · 4 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert "Öne Çıkanlar" not in out
+        assert ALL_DORMANT_VOICE_NOTE in out
+        assert out.count(ALL_DORMANT_VOICE_NOTE) == 1
+
+    def test_two_dormant_blocks_split_by_blank_emit_single_note(self) -> None:
+        text = (
+            "- A · POLİTİKA · `arc_a` · 3 gün önce\n"
+            "- B · EKONOMİ · `arc_b` · 4 gün önce\n"
+            "\n"
+            "- C · TOPLUM · `arc_c` · 5 gün önce\n"
+            "- D · YARGI · `arc_d` · 6 gün önce\n"
+        )
+        out = preprocess_for_tts(text)
+        assert out.count(ALL_DORMANT_VOICE_NOTE) == 1
+        for h in ("A ·", "B ·", "C ·", "D ·"):
+            assert h not in out
 
 
 # ── Order-of-operations integration ────────────────────────────────────────

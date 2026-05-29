@@ -1,13 +1,21 @@
-"""Writer orchestrator: per-section LLM generation with stub fallback.
+"""Writer orchestrator: per-section generation with stub fallback.
 
 Per the 2026-05-27 per-section refactor (ADR-012 amendment) the writer
-issues 8 calls · one per template section · rather than one big prompt.
-Six LLM-driven sections use ``generate_with_prefill`` with the section
-marker as the assistant prefill so the model cannot emit the wrong
-header. Section 7 (SİSTEM LOG) is rendered deterministically. Empty
-sections (no payload data) emit a canonical "bugün öğe yok" note
-WITHOUT calling the LLM · the 2026-05-27 hallucinated specimen showed
-the model invents content for empty sections every time.
+composes one section at a time rather than one big prompt. Per the
+2026-05-29 Group-A decision (D4) the split is now:
+
+* **LLM sections** · DEFCON 1-2 (0) and DEFCON 3 (1) only. These carry
+  structured cluster prose that has stayed faithful. Each uses
+  ``generate_with_prefill`` with the section marker as the assistant
+  prefill so the model cannot emit the wrong header. Empty sections (no
+  payload data) emit a canonical "bugün öğe yok" note WITHOUT calling
+  the LLM · the 2026-05-27 hallucinated specimen showed the model
+  invents content for empty sections every time.
+* **Deterministic sections** · the five itemized sections (open arcs,
+  DEFCON 4, social-only, ambient, resolved · indices 2-6) are rendered
+  from payload data by :mod:`musahit.writer.render` with NO LLM call, so
+  Mode-4 narrative fabrication is impossible for them by construction.
+* **SİSTEM LOG** (7) is rendered deterministically as before.
 
 Failure isolation:
 
@@ -54,6 +62,10 @@ from musahit.writer.prompt import (
     build_system_log_section,
     build_writer_system,
 )
+from musahit.writer.render import (
+    DETERMINISTIC_SECTION_INDICES,
+    render_deterministic_section,
+)
 from musahit.writer.template import DOCUMENT_TITLE, TEMPLATE_SECTIONS
 from musahit.writer.validator import validate_briefing_markdown, validate_section
 
@@ -69,9 +81,13 @@ DEFAULT_WRITER_MAX_TOKENS: int = 4096
 # only safe answer is "don't call the LLM."
 EMPTY_SECTION_NOTE_TR: str = "Bugün bu bölümde öğe yok."
 
-# Indices into TEMPLATE_SECTIONS. 7 is the deterministic SİSTEM LOG.
+# Indices into TEMPLATE_SECTIONS. Per the 2026-05-29 Group-A decision
+# (D4) only DEFCON 1-2 (0) and DEFCON 3 (1) remain LLM-generated; the five
+# itemized sections (2-6) are rendered deterministically by
+# musahit.writer.render (no LLM call → no Mode-4 fabrication), and 7
+# (SİSTEM LOG) has always been deterministic via build_system_log_section.
 SYSTEM_LOG_SECTION_IDX: int = 7
-LLM_SECTION_INDICES: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
+LLM_SECTION_INDICES: tuple[int, ...] = (0, 1)
 
 
 class Briefer:
@@ -146,24 +162,32 @@ class Briefer:
 
         Returns ``(markdown, used_fallback, sections_failed)``.
 
-        * ``sections_failed`` lists LLM-section indices (0-6) that
+        * ``sections_failed`` lists LLM-section indices (0-1) that
           could not be generated cleanly and were replaced with a stub.
           Empty sections that emitted the canonical "öğe yok" note are
-          NOT counted as failures · empties are correct behavior.
-        * ``used_fallback`` is True only when all 8 sections failed OR
-          when the final assembled markdown still fails
-          ``validate_briefing_markdown`` (last-resort safety net).
+          NOT counted as failures · empties are correct behavior. The
+          deterministic sections (2-6) never appear here.
+        * ``used_fallback`` is True only when the final assembled
+          markdown still fails ``validate_briefing_markdown``
+          (last-resort safety net); partial LLM-section stubs are not
+          full fallback.
         """
         sections: list[str | None] = [None] * len(TEMPLATE_SECTIONS)
         failed_indices: list[int] = []
 
+        # LLM sections (DEFCON 1-2, DEFCON 3) · structured cluster prose.
         for idx in LLM_SECTION_INDICES:
             section = await self._compose_section(payload, idx, log)
             if section.failed:
                 failed_indices.append(idx)
-                sections[idx] = section.text
-            else:
-                sections[idx] = section.text
+            sections[idx] = section.text
+
+        # Deterministic itemized sections (open arcs, DEFCON 4, social-only,
+        # ambient, resolved) · rendered from payload data, never the LLM, so
+        # they cannot hallucinate. The empty-section short-circuit is
+        # preserved: an empty (or all-EXPIRED) section emits the canonical note.
+        for idx in DETERMINISTIC_SECTION_INDICES:
+            sections[idx] = self._compose_deterministic_section(payload, idx, log)
 
         # SİSTEM LOG is always deterministic · also reports the failed
         # indices so the operator sees what fell back to stubs.
@@ -242,6 +266,26 @@ class Briefer:
             )
             return _SectionResult(text=render_section_stub(idx), failed=True)
         return _SectionResult(text=full, failed=False)
+
+    def _compose_deterministic_section(
+        self, payload: BriefingPayload, idx: int, log: Any
+    ) -> str:
+        """Render a deterministic itemized section under its marker.
+
+        No LLM call · the body is rendered from payload data by
+        :mod:`musahit.writer.render`. ``None`` body (empty or all-EXPIRED
+        section) collapses to the canonical empty-state note, preserving
+        the existing short-circuit behavior. These sections never appear
+        in ``sections_failed`` — deterministic rendering cannot fail the
+        way an LLM call can.
+        """
+        marker = TEMPLATE_SECTIONS[idx].marker
+        prefill = f"{marker}\n\n"
+        body = render_deterministic_section(payload, idx)
+        if body is None:
+            log.info("writer_section_deterministic_empty", section_idx=idx)
+            return f"{prefill}{EMPTY_SECTION_NOTE_TR}\n"
+        return f"{prefill}{body}\n"
 
     def _llm_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
